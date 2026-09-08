@@ -14,3 +14,5 @@ data/labels/*
 !data/**/.gitkeep
 models/
 *.onnx
+data/pose/*
+!data/pose/.gitkeep
