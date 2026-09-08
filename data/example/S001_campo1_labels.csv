@@ -1,0 +1,12 @@
+﻿session_id,animal_id,field,behavior,start_frame,end_frame,annotator
+S001,R01,0,walking,30,125,exemplo
+S001,R01,0,resting,126,139,exemplo
+S001,R01,0,sniffing,140,210,exemplo
+S001,R01,0,rearing,180,210,exemplo
+S001,R01,0,resting,211,379,exemplo
+S001,R01,0,walking,380,440,exemplo
+S001,R01,0,rearing,445,485,exemplo
+S001,R01,0,resting,486,519,exemplo
+S001,R01,0,grooming,515,565,exemplo
+S001,R01,0,resting,566,619,exemplo
+S001,R01,0,unscorable,300,320,exemplo

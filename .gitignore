@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Dados de sessão real e modelos treinados ficam fora do controle de versão.
+# data/example/ é sintético e versionado de propósito.
+data/features/*
+data/labels/*
+!data/**/.gitkeep
+models/
+*.onnx
