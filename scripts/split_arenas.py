@@ -109,6 +109,8 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--crf", type=int, default=18, help="18 é visualmente sem perdas")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="retoma sem refazer o que já foi cortado")
     args = parser.parse_args()
 
     sources = sorted(p for p in args.input.iterdir() if p.suffix.upper() == ".MPG")
@@ -145,7 +147,7 @@ def main() -> int:
 
         for camera, animal in occupied.items():
             destination = args.output / f"{phase}_{animal}_cam{camera}.mp4"
-            if not args.dry_run:
+            if not args.dry_run and not (args.skip_existing and destination.exists()):
                 offset = CAMERA_OFFSETS[camera]
                 ok = (crop_with_ffmpeg(source, destination, offset, args.crf)
                       if have_ffmpeg else crop_with_opencv(source, destination, offset))
