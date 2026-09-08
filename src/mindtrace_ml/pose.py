@@ -137,12 +137,18 @@ def crop_field(frame_bgr: np.ndarray, field: int, layout: str) -> np.ndarray:
 
 def extract_video(video_path, model: PoseModel, fields=(0,), layout="mosaic2x2",
                   every: int = 1, max_frames: int | None = None, progress=None,
-                  roi=None, use_equalize: bool = False):
+                  roi=None, use_equalize: bool = False, keypoints=None):
     """Percorre o vídeo e devolve uma linha por (quadro, campo).
 
     `every` amostra 1 a cada N quadros — útil para uma verificação rápida antes
     de rodar a sessão inteira. Os índices continuam sendo os do vídeo.
     """
+    names = tuple(keypoints) if keypoints else tuple(f"kp{i}" for i in range(model.n_keypoints))
+    if len(names) != model.n_keypoints:
+        raise ValueError(
+            f"o modelo tem {model.n_keypoints} pontos, mas {len(names)} nomes foram dados: {names}"
+        )
+
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise RuntimeError(f"não foi possível abrir o vídeo: {video_path}")
@@ -168,10 +174,10 @@ def extract_video(video_path, model: PoseModel, fields=(0,), layout="mosaic2x2",
             for field in fields:
                 points = model.infer(crop_field(prepared, field, layout))
                 row = {"frame": frame_index, "time_ms": round(time_ms, 2), "field": field}
-                for index, point in enumerate(points):
-                    row[f"kp{index}_x"] = round(point.x, 3) if point.valid else -1.0
-                    row[f"kp{index}_y"] = round(point.y, 3) if point.valid else -1.0
-                    row[f"kp{index}_p"] = round(point.p, 4)
+                for name, point in zip(names, points):
+                    row[f"{name}_x"] = round(point.x, 3) if point.valid else np.nan
+                    row[f"{name}_y"] = round(point.y, 3) if point.valid else np.nan
+                    row[f"{name}_p"] = round(point.p, 4)
                 rows.append(row)
 
             processed += 1
