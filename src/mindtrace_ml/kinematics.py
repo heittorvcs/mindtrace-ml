@@ -23,12 +23,14 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 
+from .schema import CONFIDENCE_THRESHOLD
+
 DEFAULT_WINDOWS_SEC = (0.2, 0.4, 1.0, 2.0)
 DEFAULT_STATS = ("mean", "std", "min", "max")
 
 
 def frame_kinematics(pose: pd.DataFrame, keypoints, fps: float,
-                     min_confidence: float | None = None) -> pd.DataFrame:
+                     min_confidence: float | None = CONFIDENCE_THRESHOLD) -> pd.DataFrame:
     """Velocidade de cada ponto e distância entre cada par, por quadro.
 
     Velocidade em px/s. Quadros com pose inválida entram como NaN e propagam —
@@ -38,6 +40,10 @@ def frame_kinematics(pose: pd.DataFrame, keypoints, fps: float,
     escala de confiança depende do modelo, então congelá-la nos CSVs obrigaria a
     reprocessar todos os vídeos a cada recalibração. Use
     `suggest_confidence_threshold` para ancorá-la na distribuição observada.
+
+    O corte vem ligado por padrão de propósito. Ponto não detectado é gravado com
+    coordenada -1 e confiança 0; sem filtro, esse -1 entraria como posição real e
+    produziria velocidades absurdas sem nenhum erro visível.
     """
     if fps <= 0:
         raise ValueError(f"fps deve ser positivo, recebeu {fps}")
