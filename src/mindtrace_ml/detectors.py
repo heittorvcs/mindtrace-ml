@@ -88,6 +88,12 @@ def head_direction(pose: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     return pose["nose_x"].to_numpy(float) - ear_x, pose["nose_y"].to_numpy(float) - ear_y
 
 
+def pose_is_valid(kinematics: pd.DataFrame) -> np.ndarray:
+    """Quadros em que ao menos um ponto foi detectado com confiança suficiente."""
+    columns = [c for c in kinematics.columns if c.startswith("speed_")]
+    return ~kinematics[columns].isna().all(axis=1).to_numpy()
+
+
 def _smooth(values: np.ndarray, fps: float, seconds: float) -> np.ndarray:
     """Mediana móvel centrada, ignorando NaN."""
     window = max(1, int(round(seconds * fps)))
@@ -195,7 +201,13 @@ def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
         "low_activity": detect_low_activity(kinematics, fps, thresholds, freezing),
         "object_interaction": detect_object_interaction(pose, objects, fps, thresholds),
     })
-    result["review"] = ~result[list(BEHAVIOR_ORDER)].any(axis=1)
+
+    # Quadro sem pose não é comportamento indeterminado — é dado faltante, e
+    # mandá-lo ao revisor lhe entrega um trecho onde não há o que ver. Separar os
+    # dois também mantém honesta a taxa de redução: cobertura de pose ruim
+    # deixaria de se disfarçar de triagem eficiente.
+    result["unscorable"] = ~pose_is_valid(kinematics)
+    result["review"] = ~result[list(BEHAVIOR_ORDER)].any(axis=1) & ~result["unscorable"]
     return result
 
 
@@ -241,6 +253,21 @@ def review_segments(triaged: pd.DataFrame, max_gap: int = 2,
 def reduction_rate(triaged: pd.DataFrame) -> float:
     """Fração do vídeo que não vai para revisão — o benefício da triagem."""
     return 1.0 - float(triaged["review"].mean())
+
+
+def composition(triaged: pd.DataFrame) -> dict:
+    """Como a sessão se reparte entre as faixas, a revisão e o dado faltante.
+
+    Reportar `unscorable` à parte impede que cobertura de pose ruim seja lida
+    como triagem eficiente: as duas reduzem o tempo de revisão, mas só uma delas
+    é um bom sinal.
+    """
+    parts = {name: float(triaged[name].mean()) for name in BEHAVIOR_ORDER}
+    parts["review"] = float(triaged["review"].mean())
+    if "unscorable" in triaged:
+        parts["unscorable"] = float(triaged["unscorable"].mean())
+    parts["reduction"] = reduction_rate(triaged)
+    return parts
 
 
 def suggest_thresholds(kinematics: pd.DataFrame) -> dict:
