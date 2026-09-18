@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mindtrace_ml.detectors import (
+    BEHAVIOR_ORDER,
     Thresholds,
     detect_freezing,
     detect_object_interaction,
@@ -158,16 +159,17 @@ class TestTriage:
         # Parado longe do objeto: freezing cobre, então não vai para revisão.
         assert result["freezing"].sum() > 40
         assert result["review"].sum() < 20
-        assert not (result["review"] & result[list(("walking", "freezing", "object_interaction"))].any(axis=1)).any()
+        assert not (result["review"] & result[list(BEHAVIOR_ORDER)].any(axis=1)).any()
 
     def test_reduction_rate_counts_what_is_skipped(self):
         triaged = pd.DataFrame({
             "frame": np.arange(10), "time_ms": np.arange(10) * 33.3,
             "walking": [True] * 8 + [False] * 2,
             "freezing": [False] * 10,
+            "low_activity": [False] * 10,
             "object_interaction": [False] * 10,
         })
-        triaged["review"] = ~triaged[["walking", "freezing", "object_interaction"]].any(axis=1)
+        triaged["review"] = ~triaged[list(BEHAVIOR_ORDER)].any(axis=1)
 
         assert reduction_rate(triaged) == pytest.approx(0.8)
 
@@ -177,11 +179,11 @@ class TestTriage:
         review[40:70] = True
         triaged = pd.DataFrame({
             "frame": np.arange(100), "time_ms": np.arange(100) * 33.3,
-            "walking": ~review, "freezing": False, "object_interaction": False,
-            "review": review,
+            "walking": ~review, "freezing": False, "low_activity": False,
+            "object_interaction": False, "review": review,
         })
 
-        segments = review_segments(triaged)
+        segments = review_segments(triaged, merge_gap_sec=0.0)
 
         assert len(segments) == 2
         assert segments.iloc[0]["n_frames"] == 30

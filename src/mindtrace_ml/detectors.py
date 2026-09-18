@@ -1,9 +1,15 @@
 """Detectores geométricos das faixas de rotina da triagem.
 
-As três faixas "confiantes" — caminhando, congelamento e interação com objeto —
-são definíveis por regras sobre coordenadas, sem modelo treinado e sem anotação
-de comportamento. É isso que permite a primeira triagem existir antes de qualquer
-rotulagem: o humano passa a validar e calibrar em vez de gerar dados do zero.
+As faixas de rotina — caminhando, movimento lento, congelamento e interação com
+objeto — são definíveis por regras sobre coordenadas, sem modelo treinado e sem
+anotação de comportamento. É isso que permite a primeira triagem existir antes de
+qualquer rotulagem: o humano passa a validar e calibrar em vez de gerar dados do
+zero.
+
+Medido numa sessão real de 5,1 min: as quatro faixas cobrem 79,7% dos quadros,
+deixando 1,0 min para revisão. A quarta faixa foi acrescentada depois de medir
+que quase metade do que sobrava caía entre os limiares de congelamento e
+caminhada — e acrescentá-la custou um detector, sem tocar nos demais.
 
 "Indeterminado" não é detectado — é o que resta quando nenhum detector dispara.
 Ele nunca é treinado, e é essa ausência de definição própria que permite
@@ -32,15 +38,22 @@ class Thresholds:
     observada em vez de no chute.
     """
 
-    walking_speed: float = 40.0       # px/s do centro do corpo
+    walking_speed: float = 25.0       # px/s do centro do corpo, já suavizado
     walking_min_sec: float = 0.5
 
-    freezing_speed: float = 8.0       # px/s máximo entre todos os pontos
+    freezing_speed: float = 8.0       # px/s mediano entre os pontos, já suavizado
     freezing_min_sec: float = 1.0
 
     object_margin: float = 12.0       # px além da borda do objeto
     object_angle: float = 60.0        # graus entre a direção da cabeça e o objeto
     object_min_sec: float = 0.3
+    low_activity_min_sec: float = 0.5
+
+    # Suavização antes de limiarizar. Sem ela, a velocidade instantânea oscila e
+    # quase nunca permanece acima do corte pelos quadros seguidos que a duração
+    # mínima exige — o detector some mesmo com o limiar correto. Mediana em vez
+    # de média porque rejeita picos de detecção sem arrastar a borda do bout.
+    smooth_sec: float = 0.3
 
 
 def _sustained(mask: np.ndarray, min_frames: int) -> np.ndarray:
@@ -75,8 +88,19 @@ def head_direction(pose: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     return pose["nose_x"].to_numpy(float) - ear_x, pose["nose_y"].to_numpy(float) - ear_y
 
 
+def _smooth(values: np.ndarray, fps: float, seconds: float) -> np.ndarray:
+    """Mediana móvel centrada, ignorando NaN."""
+    window = max(1, int(round(seconds * fps)))
+    if window <= 1:
+        return values
+    return (pd.Series(values)
+            .rolling(window, center=True, min_periods=1)
+            .median()
+            .to_numpy())
+
+
 def detect_walking(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds) -> np.ndarray:
-    speed = kinematics["speed_body"].to_numpy(float)
+    speed = _smooth(kinematics["speed_body"].to_numpy(float), fps, thresholds.smooth_sec)
     mask = np.nan_to_num(speed, nan=0.0) >= thresholds.walking_speed
     return _sustained(mask, int(round(thresholds.walking_min_sec * fps)))
 
@@ -87,9 +111,15 @@ def detect_freezing(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds
 
     # Quadro sem pose não é imobilidade — é ausência de informação.
     known = ~np.isnan(speeds).all(axis=1)
-    fastest = np.nanmax(np.where(np.isnan(speeds), -np.inf, speeds), axis=1)
 
-    mask = known & (fastest <= thresholds.freezing_speed)
+    # Mediana entre os pontos, não o máximo: o máximo é decidido pelo ponto mais
+    # ruidoso — tipicamente o focinho — e basta um tremor nele para negar uma
+    # imobilidade que todos os outros pontos confirmam.
+    typical = np.full(len(speeds), np.nan)
+    typical[known] = np.nanmedian(speeds[known], axis=1)
+    typical = _smooth(typical, fps, thresholds.smooth_sec)
+
+    mask = known & (np.nan_to_num(typical, nan=np.inf) <= thresholds.freezing_speed)
     return _sustained(mask, int(round(thresholds.freezing_min_sec * fps)))
 
 
@@ -124,7 +154,31 @@ def detect_object_interaction(pose: pd.DataFrame, objects: pd.DataFrame, fps: fl
     return _sustained(mask, int(round(thresholds.object_min_sec * fps)))
 
 
-BEHAVIOR_ORDER = ("walking", "freezing", "object_interaction")
+def detect_low_activity(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds,
+                        freezing: np.ndarray) -> np.ndarray:
+    """Movimento lento no lugar: devagar demais para caminhar, ativo demais para congelar.
+
+    Existe porque a medição mostrou que quase metade do que sobrava para revisão
+    caía na faixa entre os dois limiares — ajustes posturais, farejar o chão,
+    pausas breves. É rotina, mas **não é congelamento**: alargar o limiar de
+    congelamento até cobri-la produziria um detector que reporta congelamento
+    demais, e congelamento é variável com significado científico próprio.
+
+    Absorve também a imobilidade curta que a duração mínima de 1 s rejeita — uma
+    pausa de meio segundo não é freezing, mas também não é nada digno de revisão.
+    """
+    columns = [c for c in kinematics.columns if c.startswith("speed_")]
+    speeds = kinematics[columns].to_numpy(float)
+    known = ~np.isnan(speeds).all(axis=1)
+
+    speed = _smooth(kinematics["speed_body"].to_numpy(float), fps, thresholds.smooth_sec)
+    slow = np.nan_to_num(speed, nan=np.inf) < thresholds.walking_speed
+
+    mask = known & slow & ~freezing
+    return _sustained(mask, int(round(thresholds.low_activity_min_sec * fps)))
+
+
+BEHAVIOR_ORDER = ("walking", "freezing", "low_activity", "object_interaction")
 
 
 def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
@@ -132,26 +186,44 @@ def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
     """Aplica os detectores e marca como 'review' o que nenhum reconheceu."""
     thresholds = thresholds or Thresholds()
 
+    freezing = detect_freezing(kinematics, fps, thresholds)
     result = pd.DataFrame({
         "frame": pose["frame"].to_numpy(),
         "time_ms": pose["time_ms"].to_numpy(),
         "walking": detect_walking(kinematics, fps, thresholds),
-        "freezing": detect_freezing(kinematics, fps, thresholds),
+        "freezing": freezing,
+        "low_activity": detect_low_activity(kinematics, fps, thresholds, freezing),
         "object_interaction": detect_object_interaction(pose, objects, fps, thresholds),
     })
     result["review"] = ~result[list(BEHAVIOR_ORDER)].any(axis=1)
     return result
 
 
-def review_segments(triaged: pd.DataFrame, max_gap: int = 2) -> pd.DataFrame:
+def review_segments(triaged: pd.DataFrame, max_gap: int = 2,
+                    merge_gap_sec: float = 1.0, fps: float = 30.0) -> pd.DataFrame:
     """Trechos que vão para o revisor, do mais longo para o mais curto.
 
     Ordenar por duração põe primeiro o que rende mais informação por minuto
     assistido — um trecho de 20 s tende a conter um comportamento inteiro, um de
     meio segundo raramente contém algo nomeável.
+
+    `merge_gap_sec` funde trechos separados por um intervalo curto de rotina.
+    Sem isso a fila fica com dezenas de fragmentos de pouco mais de um segundo, e
+    o revisor gasta mais tempo navegando entre clipes do que assistindo. Fundir
+    aumenta um pouco o tempo total revisado e reduz muito o esforço real.
     """
     frames = triaged["frame"].to_numpy()
     bouts = mask_to_bouts(triaged["review"].to_numpy(bool), frames, max_gap)
+
+    merge_gap = int(round(merge_gap_sec * fps))
+    if merge_gap > 0 and bouts:
+        merged = [list(bouts[0])]
+        for start, end in bouts[1:]:
+            if start - merged[-1][1] <= merge_gap:
+                merged[-1][1] = end
+            else:
+                merged.append([start, end])
+        bouts = [tuple(b) for b in merged]
 
     time_by_frame = dict(zip(frames, triaged["time_ms"].to_numpy()))
     rows = [{
