@@ -16,3 +16,4 @@ models/
 *.onnx
 data/pose/*
 !data/pose/.gitkeep
+data/objects.csv
