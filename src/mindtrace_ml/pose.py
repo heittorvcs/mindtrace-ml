@@ -44,10 +44,25 @@ class Keypoint:
         return self.p >= CONFIDENCE_THRESHOLD
 
 
-class PoseModel:
-    """Sessão ONNX do modelo DeepLabCut exportado."""
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-    def __init__(self, model_path: str | Path, providers=None):
+
+class PoseModel:
+    """Sessão ONNX de um modelo DeepLabCut, em qualquer um dos dois formatos.
+
+    O modelo original do MindTrace veio de TensorFlow via tf2onnx: saída **NHWC**
+    `(1, H, W, K)` e entrada RGB bruta em 0-255, com a subtração de média embutida
+    no grafo. Os modelos retreinados no DLC 3.x vêm de PyTorch: saída **NCHW**
+    `(1, K, H, W)` e entrada normalizada pelas estatísticas do ImageNet, que ficam
+    *fora* do grafo. Alimentar um com a convenção do outro não gera erro — gera
+    coordenadas erradas em silêncio.
+
+    O layout é detectado pela forma da saída; a normalização segue dele, já que as
+    duas convenções vêm emparelhadas na prática.
+    """
+
+    def __init__(self, model_path: str | Path, providers=None, normalize: bool | None = None):
         self.session = ort.InferenceSession(
             str(model_path), providers=providers or ["CPUExecutionProvider"]
         )
@@ -55,28 +70,48 @@ class PoseModel:
 
         outputs = self.session.get_outputs()
         self.output_names = [output.name for output in outputs]
-
-        scoremap_shape = outputs[0].shape
-        self.n_keypoints = int(scoremap_shape[3])
-        self.heat_rows = int(scoremap_shape[1])
-        self.heat_cols = int(scoremap_shape[2])
         self.has_locref = len(outputs) >= 2
 
-    def infer(self, crop_bgr: np.ndarray) -> list[Keypoint]:
-        """Recebe um recorte BGR do OpenCV e devolve um ponto por canal."""
+        shape = [int(d) for d in outputs[0].shape]
+        # O eixo dos pontos é sempre o menor: são 2 a 8 pontos contra dezenas de
+        # células de mapa em cada dimensão espacial.
+        self.channels_first = shape[1] < shape[3]
+        if self.channels_first:
+            _, self.n_keypoints, self.heat_rows, self.heat_cols = shape
+        else:
+            _, self.heat_rows, self.heat_cols, self.n_keypoints = shape
+
+        self.normalize = self.channels_first if normalize is None else normalize
+
+        # Escala por eixo em vez de um stride único: a razão entre entrada e mapa
+        # não é a mesma nas duas dimensões, e não é inteira em todos os modelos.
+        self.scale_x = MODEL_WIDTH / self.heat_cols
+        self.scale_y = MODEL_HEIGHT / self.heat_rows
+
+    def _prepare(self, crop_bgr: np.ndarray) -> np.ndarray:
         if crop_bgr.shape[:2] != (MODEL_HEIGHT, MODEL_WIDTH):
             crop_bgr = cv2.resize(
                 crop_bgr, (MODEL_WIDTH, MODEL_HEIGHT), interpolation=cv2.INTER_LINEAR
             )
 
-        # O grafo faz a subtração de média internamente (nó Sub), então a entrada
-        # é RGB bruto em 0–255, exatamente como o C++ alimenta.
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
-        tensor = rgb[np.newaxis, ...]
+        if self.normalize:
+            rgb = (rgb / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
 
-        outputs = self.session.run(self.output_names, {self.input_name: tensor})
+        if self.channels_first:
+            return np.ascontiguousarray(rgb.transpose(2, 0, 1)[np.newaxis, ...])
+        return rgb[np.newaxis, ...]
+
+    def infer(self, crop_bgr: np.ndarray) -> list[Keypoint]:
+        """Recebe um recorte BGR do OpenCV e devolve um ponto por canal."""
+        outputs = self.session.run(self.output_names, {self.input_name: self._prepare(crop_bgr)})
+
         scoremap = outputs[0][0]
-        locref = outputs[1][0] if self.has_locref and len(outputs) >= 2 else None
+        locref = outputs[1][0] if self.has_locref else None
+        if self.channels_first:
+            scoremap = scoremap.transpose(1, 2, 0)
+            if locref is not None:
+                locref = locref.transpose(1, 2, 0)
 
         points = []
         for channel in range(self.n_keypoints):
@@ -94,8 +129,8 @@ class PoseModel:
                 offset_y = float(locref[peak_row, peak_col, channel * 2 + 1]) * LOCREF_STD
 
             points.append(Keypoint(
-                x=(peak_col + 0.5) * STRIDE + offset_x,
-                y=(peak_row + 0.5) * STRIDE + offset_y,
+                x=(peak_col + 0.5) * self.scale_x + offset_x,
+                y=(peak_row + 0.5) * self.scale_y + offset_y,
                 p=peak_score,
             ))
         return points
