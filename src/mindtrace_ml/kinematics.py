@@ -27,11 +27,17 @@ DEFAULT_WINDOWS_SEC = (0.2, 0.4, 1.0, 2.0)
 DEFAULT_STATS = ("mean", "std", "min", "max")
 
 
-def frame_kinematics(pose: pd.DataFrame, keypoints, fps: float) -> pd.DataFrame:
+def frame_kinematics(pose: pd.DataFrame, keypoints, fps: float,
+                     min_confidence: float | None = None) -> pd.DataFrame:
     """Velocidade de cada ponto e distância entre cada par, por quadro.
 
     Velocidade em px/s. Quadros com pose inválida entram como NaN e propagam —
     nunca como zero, que o modelo leria como "animal parado".
+
+    `min_confidence` é onde o corte de confiança acontece, e não na extração: a
+    escala de confiança depende do modelo, então congelá-la nos CSVs obrigaria a
+    reprocessar todos os vídeos a cada recalibração. Use
+    `suggest_confidence_threshold` para ancorá-la na distribuição observada.
     """
     if fps <= 0:
         raise ValueError(f"fps deve ser positivo, recebeu {fps}")
@@ -43,6 +49,11 @@ def frame_kinematics(pose: pd.DataFrame, keypoints, fps: float) -> pd.DataFrame:
     for name in keypoints:
         x = pose[f"{name}_x"].to_numpy(dtype=float)
         y = pose[f"{name}_y"].to_numpy(dtype=float)
+
+        if min_confidence is not None:
+            weak = pose[f"{name}_p"].to_numpy(dtype=float) < min_confidence
+            x = np.where(weak, np.nan, x)
+            y = np.where(weak, np.nan, y)
 
         dx = np.diff(x, prepend=np.nan)
         dy = np.diff(y, prepend=np.nan)
@@ -88,7 +99,30 @@ def build_features(pose: pd.DataFrame, keypoints, fps: float,
     return window_features(frame_kinematics(pose, keypoints, fps), fps, windows_sec, stats)
 
 
-def coverage_by_keypoint(pose: pd.DataFrame, keypoints, threshold: float = 0.75) -> pd.DataFrame:
+def suggest_confidence_threshold(pose: pd.DataFrame, keypoints) -> dict:
+    """Percentis da confiança por ponto, para escolher o corte olhando os dados.
+
+    A distribuição é tipicamente bimodal: uma massa alta onde o animal foi
+    detectado e uma cauda perto de zero onde não foi. O limiar pertence ao vale
+    entre as duas, e a posição desse vale muda conforme o modelo — o antigo
+    saturava por sigmoide, os do DLC 3.x regridem uma gaussiana.
+    """
+    rows = []
+    for name in keypoints:
+        values = pose[f"{name}_p"].to_numpy(dtype=float)
+        values = values[~np.isnan(values)]
+        if not len(values):
+            continue
+        percentiles = np.percentile(values, [5, 10, 25, 50, 75, 95])
+        rows.append({
+            "keypoint": name,
+            **{f"p{p}": round(float(v), 3)
+               for p, v in zip((5, 10, 25, 50, 75, 95), percentiles)},
+        })
+    return pd.DataFrame(rows)
+
+
+def coverage_by_keypoint(pose: pd.DataFrame, keypoints, threshold: float = 0.25) -> pd.DataFrame:
     """Fração de quadros em que cada ponto foi detectado com confiança suficiente.
 
     É o primeiro diagnóstico a rodar num vídeo novo: um ponto com cobertura baixa

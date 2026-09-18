@@ -94,4 +94,7 @@ MODEL_HEIGHT = 240
 STRIDE = 8.0
 LOCREF_STD = 7.2801
 PEAK_FLOOR = 0.05
-CONFIDENCE_THRESHOLD = 0.75
+# Corte padrão para os modelos do DLC 3.x, cuja cabeça regride uma gaussiana e
+# fica na faixa 0,4-0,8. O modelo antigo, saturado por sigmoide, exigia 0,75.
+# Medido no vale da distribuição bimodal dos vídeos do laboratório.
+CONFIDENCE_THRESHOLD = 0.25

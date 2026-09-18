@@ -210,8 +210,13 @@ def extract_video(video_path, model: PoseModel, fields=(0,), layout="mosaic2x2",
                 points = model.infer(crop_field(prepared, field, layout))
                 row = {"frame": frame_index, "time_ms": round(time_ms, 2), "field": field}
                 for name, point in zip(names, points):
-                    row[f"{name}_x"] = round(point.x, 3) if point.valid else np.nan
-                    row[f"{name}_y"] = round(point.y, 3) if point.valid else np.nan
+                    # Grava coordenada e confiança sempre. O limiar é decisão de
+                    # análise, e sua escala depende do modelo: o antigo saturava
+                    # perto de 1,0 por sigmoide, enquanto os do DLC 3.x regridem
+                    # uma gaussiana e ficam na faixa de 0,4-0,8. Aplicar o corte
+                    # aqui congelaria essa escolha dentro de 34 CSVs.
+                    row[f"{name}_x"] = round(point.x, 3)
+                    row[f"{name}_y"] = round(point.y, 3)
                     row[f"{name}_p"] = round(point.p, 4)
                 rows.append(row)
 
