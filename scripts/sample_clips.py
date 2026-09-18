@@ -58,7 +58,11 @@ def main() -> int:
     parser.add_argument("--objects", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--clip-sec", type=float, default=3.0)
-    parser.add_argument("--per-stratum", type=int, default=12)
+    # 25 por faixa dá 100 clipes de rotina, que é onde a estimativa de escape
+    # deixa de ser ruído: em torno de 5%, a margem cai de ±6 para ±4 pontos.
+    # Escape só é observável nos clipes classificados como rotina, então é esse
+    # número — não o total — que governa a precisão.
+    parser.add_argument("--per-stratum", type=int, default=25)
     parser.add_argument("--fps", type=float, default=29.97)
     parser.add_argument("--walking-speed", type=float, default=15.0)
     parser.add_argument("--freezing-speed", type=float, default=8.0)
