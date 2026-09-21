@@ -33,15 +33,22 @@ from .metrics import mask_to_bouts
 class Thresholds:
     """Limiares em unidades físicas — px/s e segundos, nunca px/quadro.
 
-    Os valores padrão são ponto de partida e precisam ser calibrados contra os
-    vídeos do laboratório; `suggest_thresholds` ajuda a ancorá-los na distribuição
-    observada em vez de no chute.
+    Os padrões saem da distribuição medida em 33 sessões do laboratório, com a
+    decodificação corrigida: velocidade do corpo com mediana de 13,9 px/s e p90
+    de 57,4.
+
+    Medir mostrou que a **redução é insensível a estes limiares** — de 15/8 a
+    20/12 ela fica entre 87,4% e 88,6%, porque caminhada, movimento lento e
+    congelamento são todas rotina e mexer nos cortes apenas redistribui quadros
+    entre elas. Então os limiares não devem ser escolhidos para maximizar
+    redução: devem ser escolhidos para ficarem etologicamente corretos, e é a
+    rotulagem de clipes que responde isso.
     """
 
-    walking_speed: float = 25.0       # px/s do centro do corpo, já suavizado
+    walking_speed: float = 17.0       # px/s do centro do corpo, já suavizado
     walking_min_sec: float = 0.5
 
-    freezing_speed: float = 8.0       # px/s mediano entre os pontos, já suavizado
+    freezing_speed: float = 9.0       # px/s mediano entre os pontos, já suavizado
     freezing_min_sec: float = 1.0
 
     object_margin: float = 12.0       # px além da borda do objeto
