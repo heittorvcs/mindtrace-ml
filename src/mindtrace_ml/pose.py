@@ -83,10 +83,23 @@ class PoseModel:
 
         self.normalize = self.channels_first if normalize is None else normalize
 
-        # Escala por eixo em vez de um stride único: a razão entre entrada e mapa
-        # não é a mesma nas duas dimensões, e não é inteira em todos os modelos.
-        self.scale_x = MODEL_WIDTH / self.heat_cols
-        self.scale_y = MODEL_HEIGHT / self.heat_rows
+        # O mapa de confiança NÃO cobre a imagem inteira: a rede preenche embaixo
+        # e à direita até um múltiplo do stride, e a origem segue no canto
+        # superior esquerdo. Então a conversão é `(célula + 0,5) * stride`, sem
+        # deslocamento — e não `tamanho / número de células`, que estica o mapa
+        # sobre a imagem e desloca os pontos progressivamente em direção à borda.
+        #
+        # Medido contra o centro do animal segmentado por subtração de fundo: a
+        # escala por divisão errava 26,7 px no cspnext_s e 10,1 px no resnet_50;
+        # o stride erra 4,1 e 4,5 px, que é o resíduo esperado entre o centroide
+        # da silhueta e o ponto do dorso.
+        self.stride = 2 ** round(np.log2(MODEL_WIDTH / self.heat_cols))
+        stride_y = 2 ** round(np.log2(MODEL_HEIGHT / self.heat_rows))
+        if stride_y != self.stride:
+            raise ValueError(
+                f"stride inconsistente entre eixos ({self.stride} x {stride_y}) "
+                f"para mapa {self.heat_rows}x{self.heat_cols} — modelo inesperado"
+            )
 
     def _prepare(self, crop_bgr: np.ndarray) -> np.ndarray:
         if crop_bgr.shape[:2] != (MODEL_HEIGHT, MODEL_WIDTH):
@@ -129,8 +142,8 @@ class PoseModel:
                 offset_y = float(locref[peak_row, peak_col, channel * 2 + 1]) * LOCREF_STD
 
             points.append(Keypoint(
-                x=(peak_col + 0.5) * self.scale_x + offset_x,
-                y=(peak_row + 0.5) * self.scale_y + offset_y,
+                x=(peak_col + 0.5) * self.stride + offset_x,
+                y=(peak_row + 0.5) * self.stride + offset_y,
                 p=peak_score,
             ))
         return points
