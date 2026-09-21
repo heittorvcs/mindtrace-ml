@@ -15,6 +15,17 @@ perderia algo?", e ali perderia o rearing.
 Isso faz `o` aparecer com frequência, e é o correto — um critério por presença
 enviesa a medida na direção segura, preferindo acusar escape a mascará-lo.
 
+Quando mais de uma tecla se aplica, **`e` tem prioridade**: exploração é a
+variável de desfecho do NOR, e subcontá-la é o erro mais caro do sistema. Um
+clipe de caminhada com exploração breve leva `e`.
+
+`o` fica reservado ao que **nenhum detector cobre** — rearing, grooming, o
+inesperado. A distinção importa na avaliação: clipe marcado `e` que a triagem
+chamou de caminhada aponta detector de objeto perdendo quadros, e se conserta
+ajustando margem ou ângulo; clipe marcado `o` dentro de uma faixa de rotina
+aponta comportamento sem detector, e se conserta acrescentando um. Colapsar os
+dois em `o` mostraria que há erro sem dizer qual.
+
 Uso:
     python scripts/label_clips.py --clips data/clips.csv --videos .../arenas \
                                   --output data/clip_labels.csv
