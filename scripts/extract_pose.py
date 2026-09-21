@@ -23,7 +23,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mindtrace_ml.pose import PoseModel, extract_video  # noqa: E402
-from mindtrace_ml.schema import CURRENT_KEYPOINTS, PROPOSED_KEYPOINTS  # noqa: E402
+from mindtrace_ml.schema import (  # noqa: E402
+    CONFIDENCE_THRESHOLD,
+    CURRENT_KEYPOINTS,
+    PROPOSED_KEYPOINTS,
+)
 
 
 def keypoints_for(count: int):
@@ -92,7 +96,7 @@ def main() -> int:
         frame.to_csv(destination, index=False, encoding="utf-8-sig")
 
         elapsed = time.perf_counter() - video_started
-        valid = frame[f"{names[0]}_p"].ge(0.75).mean() if len(frame) else 0.0
+        valid = frame[f"{names[0]}_p"].ge(CONFIDENCE_THRESHOLD).mean() if len(frame) else 0.0
         # flush explícito: fora de um terminal o Python usa buffer de bloco, e o
         # progresso só apareceria ao final — inútil num processo de uma hora.
         print(f"[{index}/{len(videos)}] {video.name} — {len(frame)} linhas, "
