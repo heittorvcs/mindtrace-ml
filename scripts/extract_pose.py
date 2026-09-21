@@ -80,7 +80,7 @@ def main() -> int:
     for index, video in enumerate(videos, start=1):
         destination = args.output / f"{video.stem}.csv"
         if destination.exists() and not args.overwrite:
-            print(f"[{index}/{len(videos)}] {video.name} — já existe, pulado")
+            print(f"[{index}/{len(videos)}] {video.name} — já existe, pulado", flush=True)
             continue
 
         video_started = time.perf_counter()
@@ -93,8 +93,10 @@ def main() -> int:
 
         elapsed = time.perf_counter() - video_started
         valid = frame[f"{names[0]}_p"].ge(0.75).mean() if len(frame) else 0.0
+        # flush explícito: fora de um terminal o Python usa buffer de bloco, e o
+        # progresso só apareceria ao final — inútil num processo de uma hora.
         print(f"[{index}/{len(videos)}] {video.name} — {len(frame)} linhas, "
-              f"{meta['fps']:.2f} fps, cobertura {valid:.0%}, {elapsed:.0f}s")
+              f"{meta['fps']:.2f} fps, cobertura {valid:.0%}, {elapsed:.0f}s", flush=True)
         processed += 1
 
     total = time.perf_counter() - started
