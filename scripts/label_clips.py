@@ -4,9 +4,16 @@ A janela não mostra o que a triagem achou do clipe. Isso é deliberado: ver o
 palpite da máquina leva a confirmar em vez de julgar, e a medição de escape
 viraria circular.
 
-Rotule pelo que o animal está fazendo na maior parte do clipe. Quando o clipe
-misturar dois comportamentos sem um dominante, use `o` (outro) — é a resposta
-honesta, e forçar uma escolha entre duas opções ruins polui a medição.
+O critério é **presença, não dominância**. Use uma das quatro faixas de rotina
+somente quando o clipe for inteiramente aquele comportamento; use `o` quando
+contiver qualquer coisa notável, ainda que breve.
+
+Um clipe de caminhada-rearing-caminhada leva `o`, mesmo com a caminhada ocupando
+dois terços do tempo: a pergunta que a medição responde é "pular este trecho
+perderia algo?", e ali perderia o rearing.
+
+Isso faz `o` aparecer com frequência, e é o correto — um critério por presença
+enviesa a medida na direção segura, preferindo acusar escape a mascará-lo.
 
 Uso:
     python scripts/label_clips.py --clips data/clips.csv --videos .../arenas \
