@@ -14,6 +14,13 @@ mesmos clipes o que evaluate_triage mede para as regras:
 A comparação principal é na rodada de teste. As regras foram calibradas nas
 rodadas 1 e 2 e ali levam vantagem; na de teste nenhum dos dois viu os clipes.
 
+**Os números daqui são otimistas.** As rodadas 1, 2 e de teste só sortearam
+clipes inteiros dentro de uma faixa das regras, e esses trechos "puros" são 5%
+do vídeo. A validação disse ~12% de escape; a rodada sorteada do vídeo inteiro
+(`evaluate_model_round.py`) mediu 25–34%, empatado com as regras no mesmo tempo
+assistido. Use este script para comparar variantes entre si, não para estimar o
+desempenho real.
+
 Uso:
     python scripts/train_triage_model.py --pose data/pose --objects data/objects.csv \\
         --save models/triage_model.joblib

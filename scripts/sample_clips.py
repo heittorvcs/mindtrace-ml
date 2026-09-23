@@ -37,6 +37,13 @@ def sample_from(mask: np.ndarray, frames: np.ndarray, clip_frames: int,
     Exigir que o clipe todo caia dentro da faixa evita amostrar transições, que
     seriam ambíguas para o anotador e não dizem nada sobre a faixa em si.
 
+    **Mas torna a amostra não representativa.** Só 5% das janelas de 2 s caem
+    inteiras numa faixa; os outros 95% são justamente transições, e nelas 30%
+    dos clipes têm algo notável. Ponderar esses clipes pelo tamanho da faixa
+    tratou 5% do vídeo como se fosse o todo, e o escape das regras saiu 51%
+    quando o sorteio do vídeo inteiro mediu 23%. Para medir, use `--model`, que
+    ladrilha a sessão toda.
+
     Cada trecho contínuo é dividido em janelas que não se sobrepõem, e contribui
     com no máximo `max_per_run` delas. A versão anterior sorteava entre todos os
     inícios válidos: num congelamento de 10 s há ~200, e quatro sorteios caíam

@@ -350,7 +350,8 @@ def review_segments(triaged: pd.DataFrame, max_gap: int = 2,
         "n_frames": end - start + 1,
     } for start, end in bouts]
 
-    segments = pd.DataFrame(rows)
+    # Colunas explícitas: sessão sem nada para revisar dá tabela vazia, não erro.
+    segments = pd.DataFrame(rows, columns=["start_frame", "end_frame", "start_ms", "end_ms", "n_frames"])
     return segments.sort_values("n_frames", ascending=False, ignore_index=True)
 
 
