@@ -30,23 +30,48 @@ STRATA = (*BEHAVIOR_ORDER, "review")
 
 
 def sample_from(mask: np.ndarray, frames: np.ndarray, clip_frames: int,
-                count: int, rng) -> list[int]:
+                count: int, rng, max_per_run: int = 1) -> list[int]:
     """Início de clipes inteiramente contidos num trecho da faixa.
 
     Exigir que o clipe todo caia dentro da faixa evita amostrar transições, que
     seriam ambíguas para o anotador e não dizem nada sobre a faixa em si.
-    """
-    valid = []
-    run = 0
-    for index, value in enumerate(mask):
-        run = run + 1 if value else 0
-        if run >= clip_frames:
-            valid.append(index - clip_frames + 1)
 
-    if not valid:
+    Cada trecho contínuo é dividido em janelas que não se sobrepõem, e contribui
+    com no máximo `max_per_run` delas. A versão anterior sorteava entre todos os
+    inícios válidos: num congelamento de 10 s há ~200, e quatro sorteios caíam
+    quase sempre encavalados — na primeira rodada, 125 clipes eram 81 trechos
+    independentes, e os 25 de revisão vinham de apenas 3. O anotador via o mesmo
+    episódio várias vezes, e a medida contava como amostras o que era uma só.
+    """
+    runs, start = [], None
+    for index, value in enumerate(np.append(mask, False)):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            if index - start >= clip_frames:
+                runs.append((start, index))
+            start = None
+
+    starts = []
+    for run_start, run_end in runs:
+        length = run_end - run_start
+        tiles = length // clip_frames
+        # Deslocamento aleatório para não amostrar sempre o começo do trecho,
+        # que é a borda de uma transição e tende a ser atípico.
+        offset = int(rng.integers(0, length - tiles * clip_frames + 1))
+        windows = [run_start + offset + k * clip_frames for k in range(tiles)]
+        if len(windows) > max_per_run:
+            windows = list(rng.choice(windows, size=max_per_run, replace=False))
+        starts += windows
+
+    if not starts:
         return []
-    picks = rng.choice(len(valid), size=min(count, len(valid)), replace=False)
-    return [int(frames[valid[p]]) for p in sorted(picks)]
+    picks = rng.choice(len(starts), size=min(count, len(starts)), replace=False)
+    return [int(frames[starts[p]]) for p in sorted(picks)]
+
+
+def overlaps(windows, start: int, end: int) -> bool:
+    return any(start <= taken_end and end >= taken_start for taken_start, taken_end in windows)
 
 
 def main() -> int:
@@ -120,22 +145,27 @@ def main() -> int:
         for stratum, quota in quotas.items():
             starts = sample_from(triaged[stratum].to_numpy(bool), frames,
                                  clip_frames, quota * 3, rng)
-            for start in starts:
-                end = start + clip_frames - 1
-                if any(start <= e and end >= s0 for s0, e in taken.get(session, [])):
-                    continue
-                candidates[stratum].append((session, start))
+            candidates[stratum] += [(session, start) for start in starts]
 
+    # A seleção final percorre cada estrato em ordem aleatória e recusa janelas
+    # que cruzem qualquer outra já escolhida — inclusive de outro estrato. A
+    # triagem é multi-etiqueta, então o mesmo trecho pode ser candidato em duas
+    # faixas, e sem isso apareceria duas vezes na rodada.
     rows = []
     print(f"\n{'faixa':<20} {'candidatos':>11} {'sorteados':>10}")
     print("-" * 44)
     for stratum, quota in quotas.items():
         pool = candidates[stratum]
-        take = min(quota, len(pool))
-        picks = rng.choice(len(pool), size=take, replace=False) if pool else []
-        print(f"{stratum:<20} {len(pool):>11} {take:>10}")
-        for p in picks:
+        chosen = 0
+        for p in (rng.permutation(len(pool)) if pool else []):
+            if chosen >= quota:
+                break
             session, start = pool[p]
+            end = start + clip_frames - 1
+            if overlaps(taken.get(session, []), start, end):
+                continue
+            taken.setdefault(session, []).append((start, end))
+            chosen += 1
             rows.append({
                 "clip_id": f"{session}_{start}",
                 "session_id": session,
@@ -143,6 +173,7 @@ def main() -> int:
                 "end_frame": start + clip_frames - 1,
                 "triage_label": stratum,
             })
+        print(f"{stratum:<20} {len(pool):>11} {chosen:>10}")
 
     clips = pd.DataFrame(rows).sample(frac=1.0, random_state=args.seed, ignore_index=True)
 
