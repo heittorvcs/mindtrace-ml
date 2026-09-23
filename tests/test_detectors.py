@@ -188,3 +188,71 @@ class TestTriage:
         assert len(segments) == 2
         assert segments.iloc[0]["n_frames"] == 30
         assert segments.iloc[1]["n_frames"] == 5
+
+
+class TestActiveHead:
+    def _pose_with_head(self, n, body_positions, neck_offsets):
+        pose = make_pose(n, body_xy=body_positions)
+        pose["neck_x"] = [b[0] + o[0] for b, o in zip(body_positions, neck_offsets)]
+        pose["neck_y"] = [b[1] + o[1] for b, o in zip(body_positions, neck_offsets)]
+        return pose
+
+    def test_head_working_over_still_body_is_flagged(self):
+        n = 60
+        body = [(100.0, 100.0)] * n
+        # Pescoço oscilando 2 px por quadro em torno do dorso parado: 60 px/s.
+        neck = [(0.0, -8.0 + (2.0 if i % 2 else -2.0)) for i in range(n)]
+        pose = self._pose_with_head(n, body, neck)
+        from mindtrace_ml.detectors import detect_active_head
+        no_object = np.zeros(n, dtype=bool)
+
+        mask = detect_active_head(pose, kin(pose), FPS, Thresholds(), no_object)
+
+        assert mask.sum() > 30
+
+    def test_still_head_is_not_grooming(self):
+        n = 60
+        pose = self._pose_with_head(n, [(100.0, 100.0)] * n, [(0.0, -8.0)] * n)
+        from mindtrace_ml.detectors import detect_active_head
+
+        mask = detect_active_head(pose, kin(pose), FPS, Thresholds(), np.zeros(n, dtype=bool))
+
+        assert not mask.any()
+
+    def test_moving_body_is_not_grooming(self):
+        # Cabeça mexe, mas o corpo inteiro se desloca: é locomoção, não grooming.
+        n = 60
+        body = [(100.0 + i * 3, 100.0) for i in range(n)]
+        neck = [(0.0, -8.0 + (2.0 if i % 2 else -2.0)) for i in range(n)]
+        pose = self._pose_with_head(n, body, neck)
+        from mindtrace_ml.detectors import detect_active_head
+
+        mask = detect_active_head(pose, kin(pose), FPS, Thresholds(), np.zeros(n, dtype=bool))
+
+        assert not mask.any()
+
+    def test_near_object_is_left_to_the_object_detector(self):
+        n = 60
+        body = [(100.0, 100.0)] * n
+        neck = [(0.0, -8.0 + (2.0 if i % 2 else -2.0)) for i in range(n)]
+        pose = self._pose_with_head(n, body, neck)
+        from mindtrace_ml.detectors import detect_active_head
+
+        mask = detect_active_head(pose, kin(pose), FPS, Thresholds(), np.ones(n, dtype=bool))
+
+        assert not mask.any()
+
+    def test_active_head_sends_slow_frames_to_review(self):
+        n = 90
+        body = [(100.0, 100.0)] * n
+        neck = [(0.0, -8.0 + (2.0 if i % 2 else -2.0)) for i in range(n)]
+        pose = self._pose_with_head(n, body, neck)
+        objects = pd.DataFrame([{"center_x": 300.0, "center_y": 20.0, "radius": 10.0}])
+
+        result = triage(pose, kin(pose), objects, FPS)
+
+        # Quadros sem pose válida vão para "não pontuável", não para revisão.
+        flagged = result["active_head"].to_numpy() & ~result["unscorable"].to_numpy()
+        assert flagged.sum() > 30
+        assert result["review"].to_numpy()[flagged].all()
+        assert not result["low_activity"].to_numpy()[flagged].any()

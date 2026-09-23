@@ -56,6 +56,12 @@ class Thresholds:
     object_min_sec: float = 0.3
     low_activity_min_sec: float = 0.5
 
+    # Cabeça ativa: pescoço se mexendo em relação ao dorso, com o dorso parado.
+    active_head_speed: float = 12.0   # px/s do pescoço relativo ao dorso
+    active_head_body_speed: float = 12.0   # px/s máximo do dorso
+    active_head_min_sec: float = 0.5
+    active_head_smooth_sec: float = 0.5
+
     # Suavização antes de limiarizar. Sem ela, a velocidade instantânea oscila e
     # quase nunca permanece acima do corte pelos quadros seguidos que a duração
     # mínima exige — o detector some mesmo com o limiar correto. Mediana em vez
@@ -191,7 +197,47 @@ def detect_low_activity(kinematics: pd.DataFrame, fps: float, thresholds: Thresh
     return _sustained(mask, int(round(thresholds.low_activity_min_sec * fps)))
 
 
+def detect_active_head(pose: pd.DataFrame, kinematics: pd.DataFrame, fps: float,
+                    thresholds: Thresholds, object_interaction: np.ndarray) -> np.ndarray:
+    """Cabeça trabalhando sobre um corpo parado, longe dos objetos.
+
+    Não é um classificador de comportamento: é o critério que **desqualifica
+    "parado"**. A primeira medição mostrou que 44% dos clipes que a faixa de
+    movimento lento reivindicava continham algo notável — sobretudo grooming —, e
+    o que eles tinham em comum era a cabeça se mexendo com o corpo parado. Esses
+    trechos deixam de ser rotina e vão para "outros".
+
+    Nos 181 clipes rotulados, a velocidade do pescoço relativa ao dorso tem
+    mediana de 13,1 px/s no grooming contra 6,0 no animal parado (AUC 0,91). Usa o
+    pescoço, não o focinho, porque o focinho some justamente nesses trechos —
+    visível em 70% dos quadros contra 100% — enquanto o pescoço tem 97% de
+    cobertura.
+
+    Dispara também em parte dos clipes marcados como parado, muito provavelmente
+    sniffing. É o custo aceito: mandar a mais para revisão custa segundos de vídeo;
+    mandar a menos perde o evento.
+    """
+    # As posições de frame_kinematics já vêm filtradas por confiança (NaN abaixo
+    # do limiar), então a posição relativa herda a validade dos dois pontos.
+    rel_x = kinematics["posx_neck"].to_numpy(float) - kinematics["posx_body"].to_numpy(float)
+    rel_y = kinematics["posy_neck"].to_numpy(float) - kinematics["posy_body"].to_numpy(float)
+    head = np.hypot(np.diff(rel_x, prepend=np.nan), np.diff(rel_y, prepend=np.nan)) * fps
+
+    head = _smooth(head, fps, thresholds.active_head_smooth_sec)
+    body = _smooth(kinematics["speed_body"].to_numpy(float), fps, thresholds.active_head_smooth_sec)
+
+    mask = ((np.nan_to_num(head, nan=0.0) >= thresholds.active_head_speed)
+            & (np.nan_to_num(body, nan=np.inf) < thresholds.active_head_body_speed)
+            & ~object_interaction)
+    return _sustained(mask, int(round(thresholds.active_head_min_sec * fps)))
+
+
+# Faixas de rotina: o que elas reconhecem pode ser pulado.
 BEHAVIOR_ORDER = ("walking", "freezing", "low_activity", "object_interaction")
+
+# Critérios que mandam o trecho para "outros" mesmo que uma faixa de rotina o
+# reivindique — sinais de que ali acontece algo que a rotina não descreve.
+REVIEW_FLAGS = ("active_head",)
 
 
 def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
@@ -200,13 +246,18 @@ def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
     thresholds = thresholds or Thresholds()
 
     freezing = detect_freezing(kinematics, fps, thresholds)
+    object_interaction = detect_object_interaction(pose, objects, fps, thresholds)
+    active_head = detect_active_head(pose, kinematics, fps, thresholds, object_interaction)
+
     result = pd.DataFrame({
         "frame": pose["frame"].to_numpy(),
         "time_ms": pose["time_ms"].to_numpy(),
         "walking": detect_walking(kinematics, fps, thresholds),
         "freezing": freezing,
-        "low_activity": detect_low_activity(kinematics, fps, thresholds, freezing),
-        "object_interaction": detect_object_interaction(pose, objects, fps, thresholds),
+        # Cabeça ativa desqualifica "parado": esses trechos vão para "outros".
+        "low_activity": detect_low_activity(kinematics, fps, thresholds, freezing) & ~active_head,
+        "object_interaction": object_interaction,
+        "active_head": active_head,
     })
 
     # Quadro sem pose não é comportamento indeterminado — é dado faltante, e
@@ -214,7 +265,9 @@ def triage(pose: pd.DataFrame, kinematics: pd.DataFrame, objects: pd.DataFrame,
     # dois também mantém honesta a taxa de redução: cobertura de pose ruim
     # deixaria de se disfarçar de triagem eficiente.
     result["unscorable"] = ~pose_is_valid(kinematics)
-    result["review"] = ~result[list(BEHAVIOR_ORDER)].any(axis=1) & ~result["unscorable"]
+    unclaimed = ~result[list(BEHAVIOR_ORDER)].any(axis=1)
+    flagged = result[list(REVIEW_FLAGS)].any(axis=1)
+    result["review"] = (unclaimed | flagged) & ~result["unscorable"]
     return result
 
 

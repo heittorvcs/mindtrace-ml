@@ -4,35 +4,27 @@ A janela não mostra o que a triagem achou do clipe. Isso é deliberado: ver o
 palpite da máquina leva a confirmar em vez de julgar, e a medição de escape
 viraria circular.
 
+As classes são as quatro do plano da triagem: caminhando, parado, exploração e
+outros. "Outros" é tudo o que não é rotina — grooming, rearing, sniffing fora do
+objeto, o inesperado —, e não precisa ser discriminado: a triagem só precisa
+saber o que pode ser pulado.
+
 O critério é **presença, não dominância**. Use `c` ou `p` somente quando o
-clipe for inteiramente aquele comportamento; use `g`, `r` ou `o` quando o
-comportamento aparecer, ainda que breve.
+clipe for inteiramente aquilo; use `e` ou `o` quando aparecer, ainda que breve.
 
-Um clipe de caminhada-rearing-caminhada leva `r`, mesmo com a caminhada
-ocupando dois terços do tempo: a pergunta que a medição responde é "pular este
-trecho perderia algo?", e ali perderia o rearing.
+Um clipe de caminhada-rearing-caminhada leva `o`, mesmo com a caminhada ocupando
+dois terços do tempo: a pergunta é "pular este trecho perderia algo?", e ali
+perderia o rearing.
 
-Grooming e rearing têm teclas próprias porque a primeira rodada, que os reunia em
-`o`, mostrou que é deles a maior parte do que escapa — e cada um pede um detector
-diferente. Rótulo específico diz diretamente qual construir.
-
-Congelamento e movimento lento viraram uma tecla só, `p` (parado): na primeira
-rodada `l` foi usado uma vez em 125 clipes, porque a distinção não existia na
-prática de quem rotula. Tecla que ninguém usa só produz medição falsa.
-
-Quando mais de uma tecla se aplica, **`e` tem prioridade**: exploração é a
-variável de desfecho do NOR, e subcontá-la é o erro mais caro do sistema. Depois
-vêm `g` e `r`; se os dois aparecerem, use o que durou mais.
-
-`o` fica para o notável que não é grooming nem rearing — o inesperado.
+Quando `e` e `o` se aplicam juntos, `e` tem prioridade: exploração é a
+variável de desfecho do NOR.
 
 Uso:
     python scripts/label_clips.py --clips data/clips.csv --videos .../arenas \
                                   --output data/clip_labels.csv
 
 Teclas:
-    c = caminhando        p = parado (congelado ou mexendo pouco no lugar)
-    e = explorando objeto g = grooming    r = rearing    o = outro notável
+    c = caminhando    p = parado    e = explorando objeto    o = outros
     x = não dá para ver (ocluso, animal fora)
     volta = desfazer o último    q = salvar e sair
 """
@@ -60,14 +52,12 @@ LABELS = {
     "c": "walking",
     "p": "still",
     "e": "object_interaction",
-    "g": "grooming",
-    "r": "rearing",
     "o": "other",
     "x": "unscorable",
 }
 
-LEGEND = ("c=caminhando  p=parado  e=explorando objeto  g=grooming  r=rearing\n"
-          "o=outro notavel  x=nao da para ver  |  presenca, nao dominancia  |  q=sair")
+LEGEND = ("c=caminhando   p=parado   e=explorando objeto   o=outros (qualquer coisa alem disso)\n"
+          "x=nao da para ver   |   presenca, nao dominancia   |   volta=desfazer   q=sair")
 
 
 def read_clip(video_path: Path, start: int, end: int) -> list[np.ndarray]:
