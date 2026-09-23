@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .schema import BEHAVIORS, LABEL_COLUMNS, UNSCORABLE
+from .schema import BEHAVIORS, LABEL_COLUMNS, SESSION_BEHAVIORS, UNSCORABLE
 
 
 def load_labels(path: str | Path) -> pd.DataFrame:
@@ -21,7 +21,7 @@ def load_labels(path: str | Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{path}: colunas ausentes no CSV de rótulos: {missing}")
 
-    valid = set(BEHAVIORS) | {UNSCORABLE}
+    valid = set(BEHAVIORS) | set(SESSION_BEHAVIORS) | {UNSCORABLE}
     unknown = sorted(set(frame["behavior"]) - valid)
     if unknown:
         raise ValueError(f"{path}: comportamentos desconhecidos: {unknown}")

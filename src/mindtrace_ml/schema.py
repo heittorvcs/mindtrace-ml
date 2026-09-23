@@ -2,6 +2,10 @@
 
 BEHAVIORS = ("walking", "sniffing", "grooming", "resting", "rearing")
 
+# Marcados na rotulagem de sessões completas (scripts/label_session.py). Movimento
+# e parado não estão aqui: saem da posição, não de anotação.
+SESSION_BEHAVIORS = ("object_interaction", "grooming", "sniffing", "rearing", "other")
+
 UNSCORABLE = "unscorable"
 
 # Índices emitidos por BehaviorScanner::classifySimple(), espelhados em
