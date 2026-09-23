@@ -4,37 +4,37 @@ A janela não mostra o que a triagem achou do clipe. Isso é deliberado: ver o
 palpite da máquina leva a confirmar em vez de julgar, e a medição de escape
 viraria circular.
 
-O critério é **presença, não dominância**. Use uma das quatro faixas de rotina
-somente quando o clipe for inteiramente aquele comportamento; use `o` quando
-contiver qualquer coisa notável, ainda que breve.
+O critério é **presença, não dominância**. Use `c` ou `p` somente quando o
+clipe for inteiramente aquele comportamento; use `g`, `r` ou `o` quando o
+comportamento aparecer, ainda que breve.
 
-Um clipe de caminhada-rearing-caminhada leva `o`, mesmo com a caminhada ocupando
-dois terços do tempo: a pergunta que a medição responde é "pular este trecho
-perderia algo?", e ali perderia o rearing.
+Um clipe de caminhada-rearing-caminhada leva `r`, mesmo com a caminhada
+ocupando dois terços do tempo: a pergunta que a medição responde é "pular este
+trecho perderia algo?", e ali perderia o rearing.
 
-Isso faz `o` aparecer com frequência, e é o correto — um critério por presença
-enviesa a medida na direção segura, preferindo acusar escape a mascará-lo.
+Grooming e rearing têm teclas próprias porque a primeira rodada, que os reunia em
+`o`, mostrou que é deles a maior parte do que escapa — e cada um pede um detector
+diferente. Rótulo específico diz diretamente qual construir.
+
+Congelamento e movimento lento viraram uma tecla só, `p` (parado): na primeira
+rodada `l` foi usado uma vez em 125 clipes, porque a distinção não existia na
+prática de quem rotula. Tecla que ninguém usa só produz medição falsa.
 
 Quando mais de uma tecla se aplica, **`e` tem prioridade**: exploração é a
-variável de desfecho do NOR, e subcontá-la é o erro mais caro do sistema. Um
-clipe de caminhada com exploração breve leva `e`.
+variável de desfecho do NOR, e subcontá-la é o erro mais caro do sistema. Depois
+vêm `g` e `r`; se os dois aparecerem, use o que durou mais.
 
-`o` fica reservado ao que **nenhum detector cobre** — rearing, grooming, o
-inesperado. A distinção importa na avaliação: clipe marcado `e` que a triagem
-chamou de caminhada aponta detector de objeto perdendo quadros, e se conserta
-ajustando margem ou ângulo; clipe marcado `o` dentro de uma faixa de rotina
-aponta comportamento sem detector, e se conserta acrescentando um. Colapsar os
-dois em `o` mostraria que há erro sem dizer qual.
+`o` fica para o notável que não é grooming nem rearing — o inesperado.
 
 Uso:
     python scripts/label_clips.py --clips data/clips.csv --videos .../arenas \
                                   --output data/clip_labels.csv
 
 Teclas:
-    c = caminhando      l = movimento lento    f = congelamento
-    e = explorando objeto                      o = outro / interessante
+    c = caminhando        p = parado (congelado ou mexendo pouco no lugar)
+    e = explorando objeto g = grooming    r = rearing    o = outro notável
     x = não dá para ver (ocluso, animal fora)
-    espaço = repetir    volta = desfazer o último    q = salvar e sair
+    volta = desfazer o último    q = salvar e sair
 """
 
 import argparse
@@ -50,17 +50,24 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FuncAnimation  # noqa: E402
 
+# O matplotlib tem atalhos padrão em quase todas as teclas de rótulo — p arrasta,
+# g liga a grade, r volta a visão, c e backspace navegam no histórico, o faz zoom.
+# O teclado desta janela é só da rotulagem; a barra de ferramentas segue no mouse.
+for _keymap in [k for k in plt.rcParams if k.startswith("keymap.")]:
+    plt.rcParams[_keymap] = []
+
 LABELS = {
     "c": "walking",
-    "l": "low_activity",
-    "f": "freezing",
+    "p": "still",
     "e": "object_interaction",
+    "g": "grooming",
+    "r": "rearing",
     "o": "other",
     "x": "unscorable",
 }
 
-LEGEND = ("c=caminhando   l=mov.lento   f=congelamento   e=explorando objeto\n"
-          "o=outro/interessante   x=nao da para ver   espaco=repetir   q=sair")
+LEGEND = ("c=caminhando  p=parado  e=explorando objeto  g=grooming  r=rearing\n"
+          "o=outro notavel  x=nao da para ver  |  presenca, nao dominancia  |  q=sair")
 
 
 def read_clip(video_path: Path, start: int, end: int) -> list[np.ndarray]:

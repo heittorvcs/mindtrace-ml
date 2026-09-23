@@ -64,14 +64,35 @@ def main() -> int:
     # número — não o total — que governa a precisão.
     parser.add_argument("--per-stratum", type=int, default=25)
     parser.add_argument("--fps", type=float, default=29.97)
-    parser.add_argument("--walking-speed", type=float, default=15.0)
-    parser.add_argument("--freezing-speed", type=float, default=8.0)
+    parser.add_argument("--strata", default=None,
+                        help="ex.: low_activity:50,walking:30 — padrão: todos, --per-stratum cada")
+    parser.add_argument("--exclude", type=Path, nargs="*", default=[],
+                        help="CSVs de clipes já sorteados, para não repeti-los")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
-    thresholds = Thresholds(walking_speed=args.walking_speed,
-                            freezing_speed=args.freezing_speed)
+    # Limiares padrão do módulo: o sorteio precisa usar os mesmos que a triagem
+    # avaliada, senão o estrato do clipe não corresponde ao que se mede.
+    thresholds = Thresholds()
+
+    quotas = {stratum: args.per_stratum for stratum in STRATA}
+    if args.strata:
+        quotas = {}
+        for item in args.strata.split(","):
+            name, count = item.split(":")
+            if name not in STRATA:
+                print(f"estrato desconhecido: {name}. Válidos: {', '.join(STRATA)}")
+                return 1
+            quotas[name] = int(count)
+
+    # Janelas já rotuladas, por sessão, para excluir sobreposição e não só
+    # clip_id idêntico — um clipe deslocado de poucos quadros seria o mesmo trecho.
+    taken = {}
+    for path in args.exclude:
+        previous = pd.read_csv(path, encoding="utf-8-sig")
+        for row in previous.itertuples():
+            taken.setdefault(row.session_id, []).append((row.start_frame, row.end_frame))
     clip_frames = int(round(args.clip_sec * args.fps))
     rng = np.random.default_rng(args.seed)
 
@@ -82,7 +103,7 @@ def main() -> int:
 
     # Junta todos os candidatos por faixa e só depois sorteia, para que o número
     # de clipes por faixa não dependa de quantas sessões cada uma domina.
-    candidates = {stratum: [] for stratum in STRATA}
+    candidates = {stratum: [] for stratum in quotas}
 
     for path in sessions:
         session = path.stem
@@ -96,17 +117,21 @@ def main() -> int:
         triaged = triage(pose, kinematics, session_objects, args.fps, thresholds)
         frames = triaged["frame"].to_numpy()
 
-        for stratum in STRATA:
+        for stratum, quota in quotas.items():
             starts = sample_from(triaged[stratum].to_numpy(bool), frames,
-                                 clip_frames, args.per_stratum * 3, rng)
-            candidates[stratum] += [(session, start) for start in starts]
+                                 clip_frames, quota * 3, rng)
+            for start in starts:
+                end = start + clip_frames - 1
+                if any(start <= e and end >= s0 for s0, e in taken.get(session, [])):
+                    continue
+                candidates[stratum].append((session, start))
 
     rows = []
     print(f"\n{'faixa':<20} {'candidatos':>11} {'sorteados':>10}")
     print("-" * 44)
-    for stratum in STRATA:
+    for stratum, quota in quotas.items():
         pool = candidates[stratum]
-        take = min(args.per_stratum, len(pool))
+        take = min(quota, len(pool))
         picks = rng.choice(len(pool), size=take, replace=False) if pool else []
         print(f"{stratum:<20} {len(pool):>11} {take:>10}")
         for p in picks:

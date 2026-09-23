@@ -1,20 +1,31 @@
-"""Compara os rótulos humanos com a triagem e varre os limiares.
+"""Compara os rótulos humanos com a triagem, por presença.
 
 Responde a pergunta que a taxa de redução sozinha não responde: **o que está
 sendo perdido**. Redução alta com escape alto é uma ferramenta que economiza
 tempo jogando dado fora, e os dois números só existem juntos.
 
-Duas medidas:
+A avaliação é por **presença**, igual à rotulagem. Uma versão anterior comparava
+o rótulo humano com a faixa *dominante* do clipe, e isso contava como escape os
+clipes em que o detector disparou corretamente num trecho: a triagem é
+multi-etiqueta, e um quadro pode ser movimento lento e exploração ao mesmo tempo.
+Num clipe com 40% de exploração o detector de objeto acertava, mas o veredito
+dominante dizia "movimento lento".
 
-- **precisão por faixa** — quando a triagem diz "caminhando", o humano concorda?
-  Precisão baixa numa faixa de rotina significa que ela está engolindo coisa
-  alheia.
-- **taxa de escape** — dos clipes que a triagem classificou como rotina, quantos
-  o humano marcou como `other`, isto é, algo que mereceria revisão e nunca
-  chegaria a ela. É a métrica de segurança.
+Medidas:
+
+- **detecção de exploração** — nos clipes que o humano marcou como exploração, o
+  detector de objeto disparou em ao menos `--min-presence` do clipe?
+- **escape** — nos clipes com algo notável (grooming, rearing, outro), o trecho
+  chegou ao pesquisador, seja pela fila de revisão, seja rotulado por um detector
+  daquele comportamento? Os que não chegaram são escapes. É a métrica de
+  segurança.
+
+O escape é reportado também ponderado pelo tamanho de cada estrato na sessão:
+a amostragem sorteia o mesmo número de clipes por estrato, então a média simples
+superrepresenta os estratos pequenos.
 
 Uso:
-    python scripts/evaluate_triage.py --labels data/clip_labels.csv \
+    python scripts/evaluate_triage.py --labels data/clip_labels.csv \\
         --key data/clips_gabarito.csv --pose data/pose --objects data/objects.csv
 """
 
@@ -32,65 +43,65 @@ from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 
 KEYPOINTS = ("nose", "ear_left", "ear_right", "neck", "body", "tail_base")
 
+# Rótulos das duas rodadas de anotação, normalizados. A primeira rodada tinha
+# `other` genérico e distinguia congelamento de movimento lento; a segunda tem
+# teclas próprias para grooming e rearing e uma só para "parado".
+STILL = {"freezing", "low_activity", "still"}
+NOTABLE = {"other", "grooming", "rearing"}
 
-def triage_all(pose_dir: Path, objects: pd.DataFrame, fps: float,
-               thresholds: Thresholds) -> dict:
-    """Triagem de cada sessão, indexada por sessão."""
+
+def triage_sessions(pose_dir: Path, objects: pd.DataFrame, fps: float,
+                    thresholds: Thresholds) -> dict:
     out = {}
     for path in sorted(pose_dir.glob("*.csv")):
         session_objects = objects[objects.session_id == path.stem]
         if session_objects.empty:
             continue
         pose = pd.read_csv(path, encoding="utf-8-sig")
-        kinematics = frame_kinematics(pose, KEYPOINTS, fps, min_confidence=0.25)
-        out[path.stem] = triage(pose, kinematics, session_objects, fps, thresholds)
+        out[path.stem] = triage(pose, frame_kinematics(pose, KEYPOINTS, fps),
+                                session_objects, fps, thresholds)
     return out
 
 
-def clip_verdict(triaged: pd.DataFrame, start: int, end: int) -> str:
-    """Faixa dominante no clipe — o mesmo critério que o humano usou."""
+def clip_presence(triaged: pd.DataFrame, start: int, end: int) -> dict:
+    """Fração do clipe coberta por cada detector, pela revisão e pelo dado faltante."""
     window = triaged[(triaged.frame >= start) & (triaged.frame <= end)]
+    columns = [c for c in triaged.columns if c not in ("frame", "time_ms")]
     if window.empty:
-        return "unscorable"
-    if "unscorable" in window and window["unscorable"].mean() > 0.5:
-        return "unscorable"
-
-    shares = {name: float(window[name].mean()) for name in BEHAVIOR_ORDER}
-    best = max(shares, key=shares.get)
-    return best if shares[best] > 0.5 else "review"
+        return {c: 0.0 for c in columns}
+    return {c: float(window[c].mean()) for c in columns}
 
 
-def score(labels: pd.DataFrame, triages: dict, clips: pd.DataFrame) -> dict:
-    merged = clips.merge(labels, on="clip_id")
-    merged = merged[merged.label != "unscorable"]
-    if merged.empty:
-        return {}
+def evaluate(merged: pd.DataFrame, triages: dict, min_presence: float) -> pd.DataFrame:
+    rows = []
+    for clip in merged.itertuples():
+        if clip.session_id not in triages or clip.label == "unscorable":
+            continue
+        presence = clip_presence(triages[clip.session_id], clip.start_frame, clip.end_frame)
 
-    verdicts = [clip_verdict(triages[row.session_id], row.start_frame, row.end_frame)
-                if row.session_id in triages else "unscorable"
-                for row in merged.itertuples()]
-    merged = merged.assign(verdict=verdicts)
-    merged = merged[merged.verdict != "unscorable"]
+        surfaced = (presence.get("review", 0) >= min_presence
+                    or presence.get("unscorable", 0) >= min_presence
+                    # Um detector próprio do comportamento também o entrega ao
+                    # pesquisador — rotulado em vez de na fila, mas não perdido.
+                    or presence.get(clip.label, 0) >= min_presence)
 
-    routine = merged[merged.verdict.isin(BEHAVIOR_ORDER)]
-    escapes = routine[routine.label == "other"]
+        rows.append({
+            "clip_id": clip.clip_id,
+            "stratum": clip.triage_label,
+            "label": clip.label,
+            "notable": clip.label in NOTABLE,
+            "exploration": clip.label == "object_interaction",
+            "object_detected": presence.get("object_interaction", 0) >= min_presence,
+            "surfaced": surfaced,
+        })
+    return pd.DataFrame(rows)
 
-    per_stratum = {}
-    for name in BEHAVIOR_ORDER:
-        claimed = merged[merged.verdict == name]
-        if len(claimed):
-            per_stratum[name] = {
-                "n": len(claimed),
-                "precision": float((claimed.label == name).mean()),
-                "escape": float((claimed.label == "other").mean()),
-            }
 
-    return {
-        "n_clips": len(merged),
-        "escape_rate": float(len(escapes) / len(routine)) if len(routine) else float("nan"),
-        "per_stratum": per_stratum,
-        "escaped_clips": list(escapes.clip_id),
-    }
+def stratum_weights(triages: dict, strata) -> dict:
+    """Parcela aproximada de quadros de cada estrato, média entre sessões."""
+    shares = {s: np.mean([t[s].mean() for t in triages.values() if s in t]) for s in strata}
+    total = sum(shares.values())
+    return {s: v / total for s, v in shares.items()} if total else shares
 
 
 def main() -> int:
@@ -103,54 +114,57 @@ def main() -> int:
     parser.add_argument("--pose", required=True, type=Path)
     parser.add_argument("--objects", required=True, type=Path)
     parser.add_argument("--fps", type=float, default=29.97)
+    parser.add_argument("--min-presence", type=float, default=0.10,
+                        help="fração mínima do clipe (0,10 de 3 s = 0,3 s)")
     args = parser.parse_args()
 
     labels = pd.read_csv(args.labels, encoding="utf-8-sig")
-    clips = pd.read_csv(args.key, encoding="utf-8-sig")
+    key = pd.read_csv(args.key, encoding="utf-8-sig")
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
+    merged = key.merge(labels, on="clip_id")
 
-    print(f"{len(labels)} clipes rotulados\n")
-    print("distribuição dos rótulos humanos:")
-    print(labels.label.value_counts().to_string(), "\n")
+    triages = triage_sessions(args.pose, objects, args.fps, Thresholds())
+    result = evaluate(merged, triages, args.min_presence)
 
-    print(f"{'caminhada':>10} {'congelam.':>10} {'reducao':>9} {'escape':>8} {'n':>5}")
-    print("-" * 48)
+    print(f"{len(result)} clipes avaliados | presença mínima {args.min_presence:.0%} do clipe\n")
+    print("rótulos humanos:", result.label.value_counts().to_dict(), "\n")
 
-    best = None
-    for walking in (12.0, 15.0, 18.0, 22.0):
-        for freezing in (5.0, 8.0, 11.0):
-            thresholds = Thresholds(walking_speed=walking, freezing_speed=freezing)
-            triages = triage_all(args.pose, objects, args.fps, thresholds)
-            if not triages:
-                continue
+    exploration = result[result.exploration]
+    if len(exploration):
+        print(f"exploração detectada: {exploration.object_detected.mean():.0%} "
+              f"({int(exploration.object_detected.sum())}/{len(exploration)})")
 
-            reduction = float(np.mean([1 - t["review"].mean() for t in triages.values()]))
-            result = score(labels, triages, clips)
-            escape = result.get("escape_rate", float("nan"))
+    notable = result[result.notable]
+    if notable.empty:
+        print("nenhum clipe notável rotulado")
+        return 0
 
-            print(f"{walking:>10.0f} {freezing:>10.0f} {reduction:>8.1%} "
-                  f"{escape:>7.1%} {result.get('n_clips', 0):>5}")
+    print(f"\n{'estrato':<20} {'notáveis':>9} {'sinalizados':>12} {'escapes':>8}")
+    print("-" * 52)
+    weights = stratum_weights(triages, list(result.stratum.unique()))
+    weighted_notable = weighted_escaped = 0.0
+    for stratum, group in notable.groupby("stratum"):
+        escaped = int((~group.surfaced).sum())
+        print(f"{stratum:<20} {len(group):>9} {group.surfaced.mean():>11.0%} {escaped:>8}")
 
-            if not np.isnan(escape) and (best is None or
-                                         (escape <= 0.05 and reduction > best[2])):
-                best = (walking, freezing, reduction, escape, result)
+        total_in_stratum = (result.stratum == stratum).sum()
+        rate_notable = len(group) / total_in_stratum
+        weighted_notable += weights.get(stratum, 0) * rate_notable
+        weighted_escaped += weights.get(stratum, 0) * rate_notable * (1 - group.surfaced.mean())
 
-    if best:
-        walking, freezing, reduction, escape, result = best
-        print(f"\n== melhor ponto com escape <= 5% ==")
-        print(f"caminhada {walking:.0f} px/s | congelamento {freezing:.0f} px/s")
-        print(f"reducao {reduction:.1%} | escape {escape:.1%}\n")
-        print(f"{'faixa':<22} {'n':>4} {'precisao':>10} {'escape':>8}")
-        print("-" * 48)
-        for name, stats in result["per_stratum"].items():
-            print(f"{name:<22} {stats['n']:>4} {stats['precision']:>9.1%} {stats['escape']:>7.1%}")
-        if result["escaped_clips"]:
-            print(f"\nclipes que escaparam (revise estes primeiro):")
-            for clip_id in result["escaped_clips"][:10]:
-                print(f"  {clip_id}")
+    print("-" * 52)
+    print(f"escape simples: {(~notable.surfaced).mean():.0%} "
+          f"({int((~notable.surfaced).sum())}/{len(notable)} clipes notáveis)")
+    if weighted_notable:
+        print(f"escape ponderado pelo tamanho dos estratos: {weighted_escaped / weighted_notable:.0%}")
 
-    print("\nA amostra é pequena: trate estas taxas como ordem de grandeza, não")
-    print("como medida precisa. Mais clipes estreitam o intervalo.")
+    by_type = notable.groupby("label").surfaced.agg(["size", "mean"])
+    if len(by_type) > 1:
+        print("\npor tipo de evento:")
+        for label, row in by_type.iterrows():
+            print(f"  {label:<10} n={int(row['size']):>3}  sinalizados {row['mean']:.0%}")
+
+    print("\nAmostra pequena: trate as taxas como ordem de grandeza.")
     return 0
 
 
