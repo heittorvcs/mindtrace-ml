@@ -47,6 +47,8 @@ class Thresholds:
 
     walking_speed: float = 17.0       # px/s do centro do corpo, já suavizado
     walking_min_sec: float = 0.5
+    walking_straightness: float = 0.3     # deslocamento líquido / caminho, janela de 1 s
+    walking_straightness_sec: float = 1.0
 
     freezing_speed: float = 9.0       # px/s mediano entre os pontos, já suavizado
     freezing_min_sec: float = 1.0
@@ -118,10 +120,52 @@ def _smooth(values: np.ndarray, fps: float, seconds: float) -> np.ndarray:
             .to_numpy())
 
 
+def path_straightness(kinematics: pd.DataFrame, fps: float, seconds: float) -> np.ndarray:
+    """Deslocamento líquido do dorso dividido pelo caminho percorrido, numa janela.
+
+    1 é linha reta; uma curva de 90° ainda fica perto de 0,9; um vaivém ou um giro
+    no lugar cai para perto de 0.
+    """
+    x = kinematics["posx_body"].to_numpy(float)
+    y = kinematics["posy_body"].to_numpy(float)
+    half = max(1, int(round(seconds * fps / 2)))
+
+    step = np.hypot(np.diff(x, prepend=np.nan), np.diff(y, prepend=np.nan))
+    path = (pd.Series(step)
+            .rolling(2 * half + 1, center=True, min_periods=half)
+            .sum()
+            .to_numpy())
+
+    net = np.full(len(x), np.nan)
+    if len(x) > 2 * half:
+        net[half:-half] = np.hypot(x[2 * half:] - x[:-2 * half], y[2 * half:] - y[:-2 * half])
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(path > 0, net / path, np.nan)
+
+
 def detect_walking(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds) -> np.ndarray:
+    """Corpo rápido **e indo a algum lugar**.
+
+    Velocidade sozinha não basta. Na câmera oblíqua, um animal que se levanta
+    também desloca o ponto do dorso na imagem: nos clipes de caminhada que o
+    anotador marcou como contendo um evento — sobretudo rearing —, a velocidade
+    mínima dentro do clipe era 18,5 px/s, contra 20,0 na caminhada pura. Por
+    velocidade, o rearing parece locomoção, e a faixa o engolia.
+
+    O que separa é a retilineidade: o mínimo dentro do clipe cai de 0,48 na
+    caminhada pura para 0,20 nos clipes com evento (AUC 0,80). Caminhar leva o
+    animal a algum lugar; levantar e baixar, ou girar no lugar, não. Trechos
+    rápidos que voltam sobre si mesmos deixam de ser caminhada e vão para outros.
+    """
     speed = _smooth(kinematics["speed_body"].to_numpy(float), fps, thresholds.smooth_sec)
-    mask = np.nan_to_num(speed, nan=0.0) >= thresholds.walking_speed
-    return _sustained(mask, int(round(thresholds.walking_min_sec * fps)))
+    fast = np.nan_to_num(speed, nan=0.0) >= thresholds.walking_speed
+
+    straightness = path_straightness(kinematics, fps, thresholds.walking_straightness_sec)
+    # Sem janela completa (bordas, lacunas de pose) não há como julgar: não barra.
+    going = np.nan_to_num(straightness, nan=1.0) >= thresholds.walking_straightness
+
+    return _sustained(fast & going, int(round(thresholds.walking_min_sec * fps)))
 
 
 def detect_freezing(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds) -> np.ndarray:

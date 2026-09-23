@@ -256,3 +256,32 @@ class TestActiveHead:
         assert flagged.sum() > 30
         assert result["review"].to_numpy()[flagged].all()
         assert not result["low_activity"].to_numpy()[flagged].any()
+
+
+class TestWalkingStraightness:
+    def test_fast_straight_motion_is_walking(self):
+        pose = make_pose(90, body_xy=[(100 + i * 3.0, 100.0) for i in range(90)])
+
+        mask = detect_walking(kin(pose), FPS, Thresholds())
+
+        assert mask.sum() > 60
+
+    def test_fast_motion_that_goes_nowhere_is_not_walking(self):
+        # Vaivém rápido: 90 px/s de velocidade, mas o corpo não sai do lugar —
+        # é como um animal que se levanta e baixa aparece na câmera oblíqua.
+        body = [(100.0 + (3.0 if (i // 3) % 2 else 0.0) * (i % 3), 100.0) for i in range(90)]
+        pose = make_pose(90, body_xy=body)
+
+        mask = detect_walking(kin(pose), FPS, Thresholds())
+
+        assert mask.sum() < 20
+
+    def test_gentle_turn_is_still_walking(self):
+        # Quarto de círculo em 3 s: curva normal, retilineidade alta na janela de 1 s.
+        angles = np.linspace(0, np.pi / 2, 90)
+        body = [(100 + 90 * np.sin(a), 100 + 90 * (1 - np.cos(a))) for a in angles]
+        pose = make_pose(90, body_xy=body)
+
+        mask = detect_walking(kin(pose), FPS, Thresholds())
+
+        assert mask.sum() > 60
