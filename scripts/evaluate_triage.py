@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mindtrace_ml.detectors import BEHAVIOR_ORDER, Thresholds, triage  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
+from mindtrace_ml.triage_model import label_sets  # noqa: E402
 
 KEYPOINTS = ("nose", "ear_left", "ear_right", "neck", "body", "tail_base")
 
@@ -48,22 +49,6 @@ KEYPOINTS = ("nose", "ear_left", "ear_right", "neck", "body", "tail_base")
 # grooming e rearing; a de teste acrescenta sniffing e seleção múltipla.
 STILL = {"freezing", "low_activity", "still"}
 NOTABLE = {"other", "grooming", "rearing"}
-
-
-def label_sets(labels: pd.DataFrame) -> pd.Series:
-    """Conjunto de rótulos por clipe, qualquer que seja a rodada.
-
-    Rodadas antigas têm um rótulo em `label` e, em dois casos, extras em `also`;
-    a de teste tem todos em `labels`, separados por ponto e vírgula.
-    """
-    def one(row):
-        if isinstance(row.get("labels"), str) and row["labels"]:
-            return set(row["labels"].split(";"))
-        names = {row["label"]}
-        if isinstance(row.get("also"), str) and row["also"]:
-            names |= set(row["also"].split(";"))
-        return names
-    return labels.apply(one, axis=1)
 
 
 def triage_sessions(pose_dir: Path, objects: pd.DataFrame, fps: float,

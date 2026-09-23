@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mindtrace_ml.detectors import BEHAVIOR_ORDER, Thresholds, triage  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
+from mindtrace_ml.triage_model import prepare_session, score_session, surfacing_score  # noqa: E402
 
 KEYPOINTS = ("nose", "ear_left", "ear_right", "neck", "body", "tail_base")
 STRATA = (*BEHAVIOR_ORDER, "review")
@@ -70,8 +71,84 @@ def sample_from(mask: np.ndarray, frames: np.ndarray, clip_frames: int,
     return [int(frames[starts[p]]) for p in sorted(picks)]
 
 
-def overlaps(windows, start: int, end: int) -> bool:
-    return any(start <= taken_end and end >= taken_start for taken_start, taken_end in windows)
+def overlaps(windows, start: int, end: int, margin: int = 0) -> bool:
+    return any(start <= taken_end + margin and end >= taken_start - margin
+               for taken_start, taken_end in windows)
+
+
+def sample_by_score(args, objects, taken, rng) -> pd.DataFrame | None:
+    """Estratos por faixa de nota do modelo, em vez de faixa das regras.
+
+    Cada faixa é o trecho de vídeo que passa a ser pulado entre dois pontos de
+    operação — `faixa_70_80` é o que o modelo manda para revisão pulando 70% do
+    vídeo e pula quando o corte sobe para 80%. Com o clipe sorteado por faixa, o
+    escape sai medido em todos esses pontos de uma vez, e a escolha do corte fica
+    para depois de ver o resultado.
+
+    O vídeo é ladrilhado em janelas do tamanho do clipe, e a nota de cada uma é a
+    mesma que decide se ela chega ao pesquisador (`surfacing_score`). A parcela de
+    ladrilhos em cada faixa é o peso do estrato, gravado no gabarito.
+    """
+    import joblib
+
+    bundle = joblib.load(args.model)
+    # O clipe tem o tamanho da janela do modelo: é a unidade que ele julga.
+    window = clip_frames = int(round(bundle["window_sec"] * args.fps))
+    step = int(round(bundle["step_sec"] * args.fps))
+
+    # Janelas vizinhas a um clipe já rotulado incluem parte dele nas features: o
+    # modelo treinou ali. A margem mantém a rodada fora do alcance do treino.
+    margin = window
+    cuts = [float(c) for c in args.bands.split(",")]
+    tiles, pooled = [], []
+    for path in sorted(args.pose.glob("*.csv")):
+        session_objects = objects[objects.session_id == path.stem]
+        if session_objects.empty:
+            continue
+        pose = pd.read_csv(path, encoding="utf-8-sig")
+        session = prepare_session(pose, session_objects, args.fps, window, step)
+        if list(session["windows"].columns) != bundle["features"]:
+            print("as features do modelo salvo não batem com as atuais: treine de novo")
+            return None
+        scores = score_session(bundle["model"], session)
+        missing = session["unscorable"]
+        pooled.append(np.where(missing, np.inf, scores))
+
+        frames = session["frames"]
+        offset = int(rng.integers(0, clip_frames))
+        for first in range(offset, len(frames) - clip_frames + 1, clip_frames):
+            last = first + clip_frames
+            start, end = int(frames[first]), int(frames[last - 1])
+            if overlaps(taken.get(path.stem, []), start, end, margin):
+                continue
+            score = surfacing_score(scores[first:last], missing[first:last], 0.10)
+            if np.isfinite(score):
+                tiles.append((path.stem, start, end, score))
+
+    # Corte de cada ponto de operação: a nota acima da qual fica a fração de
+    # vídeo que vai para revisão. Pose ausente conta como revisada, como na triagem.
+    thresholds = np.quantile(np.concatenate(pooled), cuts)
+    edges = [0.0, *cuts, 1.0]
+    names = [f"faixa_{round(a * 100):02d}_{round(b * 100)}" for a, b in zip(edges, edges[1:])]
+
+    table = pd.DataFrame(tiles, columns=["session_id", "start_frame", "end_frame", "score"])
+    table["band"] = np.searchsorted(thresholds, table.score.to_numpy(), side="right")
+    shares = table.band.value_counts(normalize=True)
+
+    rows = []
+    print(f"\n{'faixa':<16} {'% do vídeo':>11} {'ladrilhos':>10} {'sorteados':>10}")
+    print("-" * 50)
+    for band, name in enumerate(names):
+        pool = table[table.band == band]
+        chosen = pool.sample(n=min(args.per_stratum, len(pool)), random_state=args.seed)
+        for clip in chosen.itertuples():
+            rows.append({"clip_id": f"{clip.session_id}_{clip.start_frame}",
+                         "session_id": clip.session_id,
+                         "start_frame": clip.start_frame, "end_frame": clip.end_frame,
+                         "triage_label": name, "score": round(clip.score, 4),
+                         "band_share": round(float(shares.get(band, 0.0)), 4)})
+        print(f"{name:<16} {shares.get(band, 0.0):>11.0%} {len(pool):>10} {len(chosen):>10}")
+    return pd.DataFrame(rows)
 
 
 def main() -> int:
@@ -94,6 +171,10 @@ def main() -> int:
     parser.add_argument("--exclude", type=Path, nargs="*", default=[],
                         help="CSVs de clipes já sorteados, para não repeti-los")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--model", type=Path, default=None,
+                        help="modelo de train_triage_model: estratos por faixa de nota, clipe do tamanho da janela")
+    parser.add_argument("--bands", default="0.6,0.7,0.8,0.9",
+                        help="frações de vídeo pulado que delimitam as faixas de nota")
     args = parser.parse_args()
 
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
@@ -125,6 +206,12 @@ def main() -> int:
     if not sessions:
         print(f"nenhum CSV de pose em {args.pose}")
         return 1
+
+    if args.model:
+        clips = sample_by_score(args, objects, taken, rng)
+        if clips is None:
+            return 1
+        return write_round(clips, args, clips.end_frame.iloc[0] - clips.start_frame.iloc[0] + 1)
 
     # Junta todos os candidatos por faixa e só depois sorteia, para que o número
     # de clipes por faixa não dependa de quantas sessões cada uma domina.
@@ -175,17 +262,22 @@ def main() -> int:
             })
         print(f"{stratum:<20} {len(pool):>11} {chosen:>10}")
 
-    clips = pd.DataFrame(rows).sample(frac=1.0, random_state=args.seed, ignore_index=True)
+    return write_round(pd.DataFrame(rows), args, clip_frames)
+
+
+def write_round(clips: pd.DataFrame, args, clip_frames: int) -> int:
+    clips = clips.sample(frac=1.0, random_state=args.seed, ignore_index=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    # Ordem embaralhada e sem a coluna de palpite: o arquivo que o anotador abre
-    # não pode revelar o que a triagem achou.
-    clips.drop(columns=["triage_label"]).to_csv(args.output, index=False, encoding="utf-8-sig")
+    # Ordem embaralhada e só com o necessário para achar o trecho: o arquivo que o
+    # anotador abre não pode revelar o que a triagem achou.
+    clips[["clip_id", "session_id", "start_frame", "end_frame"]].to_csv(
+        args.output, index=False, encoding="utf-8-sig")
 
     key = args.output.with_name(args.output.stem + "_gabarito.csv")
     clips.to_csv(key, index=False, encoding="utf-8-sig")
 
-    print(f"\n{len(clips)} clipes de {args.clip_sec}s em {args.output}")
+    print(f"\n{len(clips)} clipes de {clip_frames / args.fps:.1f}s em {args.output}")
     print(f"gabarito (NÃO abrir antes de rotular): {key}")
     return 0
 
