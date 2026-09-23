@@ -43,11 +43,27 @@ from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 
 KEYPOINTS = ("nose", "ear_left", "ear_right", "neck", "body", "tail_base")
 
-# Rótulos das duas rodadas de anotação, normalizados. A primeira rodada tinha
-# `other` genérico e distinguia congelamento de movimento lento; a segunda tem
-# teclas próprias para grooming e rearing e uma só para "parado".
+# Rótulos das rodadas de anotação, normalizados. A primeira tinha `other`
+# genérico e distinguia congelamento de movimento lento; a segunda separou
+# grooming e rearing; a de teste acrescenta sniffing e seleção múltipla.
 STILL = {"freezing", "low_activity", "still"}
 NOTABLE = {"other", "grooming", "rearing"}
+
+
+def label_sets(labels: pd.DataFrame) -> pd.Series:
+    """Conjunto de rótulos por clipe, qualquer que seja a rodada.
+
+    Rodadas antigas têm um rótulo em `label` e, em dois casos, extras em `also`;
+    a de teste tem todos em `labels`, separados por ponto e vírgula.
+    """
+    def one(row):
+        if isinstance(row.get("labels"), str) and row["labels"]:
+            return set(row["labels"].split(";"))
+        names = {row["label"]}
+        if isinstance(row.get("also"), str) and row["also"]:
+            names |= set(row["also"].split(";"))
+        return names
+    return labels.apply(one, axis=1)
 
 
 def triage_sessions(pose_dir: Path, objects: pd.DataFrame, fps: float,
@@ -72,25 +88,26 @@ def clip_presence(triaged: pd.DataFrame, start: int, end: int) -> dict:
     return {c: float(window[c].mean()) for c in columns}
 
 
-def evaluate(merged: pd.DataFrame, triages: dict, min_presence: float) -> pd.DataFrame:
+def evaluate(merged: pd.DataFrame, triages: dict, min_presence: float,
+             notable_set: set) -> pd.DataFrame:
     rows = []
     for clip in merged.itertuples():
-        if clip.session_id not in triages or clip.label == "unscorable":
+        names = clip.names
+        if clip.session_id not in triages or names == {"unscorable"}:
             continue
         presence = clip_presence(triages[clip.session_id], clip.start_frame, clip.end_frame)
 
         surfaced = (presence.get("review", 0) >= min_presence
-                    or presence.get("unscorable", 0) >= min_presence
-                    # Um detector próprio do comportamento também o entrega ao
-                    # pesquisador — rotulado em vez de na fila, mas não perdido.
-                    or presence.get(clip.label, 0) >= min_presence)
+                    or presence.get("unscorable", 0) >= min_presence)
+        notable = names & notable_set
 
         rows.append({
             "clip_id": clip.clip_id,
             "stratum": clip.triage_label,
-            "label": clip.label,
-            "notable": clip.label in NOTABLE,
-            "exploration": clip.label == "object_interaction",
+            "label": "+".join(sorted(names)),
+            "notable": bool(notable),
+            "notable_kinds": sorted(notable),
+            "exploration": "object_interaction" in names,
             "object_detected": presence.get("object_interaction", 0) >= min_presence,
             "surfaced": surfaced,
         })
@@ -116,18 +133,25 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=29.97)
     parser.add_argument("--min-presence", type=float, default=0.10,
                         help="fração mínima do clipe (0,10 de 3 s = 0,3 s)")
+    parser.add_argument("--sniffing-is-notable", action="store_true",
+                        help="conta sniffing fora do objeto como 'outros' em vez de rotina")
     args = parser.parse_args()
 
     labels = pd.read_csv(args.labels, encoding="utf-8-sig")
+    labels["names"] = label_sets(labels)
     key = pd.read_csv(args.key, encoding="utf-8-sig")
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
-    merged = key.merge(labels, on="clip_id")
+    merged = key.merge(labels[["clip_id", "names"]], on="clip_id")
+
+    notable_set = NOTABLE | ({"sniffing"} if args.sniffing_is_notable else set())
 
     triages = triage_sessions(args.pose, objects, args.fps, Thresholds())
-    result = evaluate(merged, triages, args.min_presence)
+    result = evaluate(merged, triages, args.min_presence, notable_set)
 
-    print(f"{len(result)} clipes avaliados | presença mínima {args.min_presence:.0%} do clipe\n")
-    print("rótulos humanos:", result.label.value_counts().to_dict(), "\n")
+    print(f"{len(result)} clipes avaliados | presença mínima {args.min_presence:.0%} do clipe")
+    print(f"sniffing conta como: {'outros' if args.sniffing_is_notable else 'rotina'}\n")
+    counts = merged["names"].explode().value_counts().to_dict()
+    print("rótulos humanos (um clipe pode ter vários):", counts, "\n")
 
     exploration = result[result.exploration]
     if len(exploration):
@@ -158,7 +182,7 @@ def main() -> int:
     if weighted_notable:
         print(f"escape ponderado pelo tamanho dos estratos: {weighted_escaped / weighted_notable:.0%}")
 
-    by_type = notable.groupby("label").surfaced.agg(["size", "mean"])
+    by_type = notable.explode("notable_kinds").groupby("notable_kinds").surfaced.agg(["size", "mean"])
     if len(by_type) > 1:
         print("\npor tipo de evento:")
         for label, row in by_type.iterrows():

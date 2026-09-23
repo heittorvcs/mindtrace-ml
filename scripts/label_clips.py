@@ -1,32 +1,31 @@
-"""Reproduz os clipes sorteados e registra o rótulo humano, às cegas.
+"""Reproduz os clipes sorteados e registra os rótulos humanos, às cegas.
 
 A janela não mostra o que a triagem achou do clipe. Isso é deliberado: ver o
 palpite da máquina leva a confirmar em vez de julgar, e a medição de escape
 viraria circular.
 
-As classes são as quatro do plano da triagem: caminhando, parado, exploração e
-outros. "Outros" é tudo o que não é rotina — grooming, rearing, sniffing fora do
-objeto, o inesperado —, e não precisa ser discriminado: a triagem só precisa
-saber o que pode ser pulado.
+**Rotule fino, a triagem modela grosso.** As teclas distinguem grooming, rearing
+e sniffing, embora a triagem só precise saber o que é rotina e o que é "outros":
+fundir rótulos finos em "outros" é uma linha de código, e separar rótulos grossos
+depois exigiria reanotar. Os rótulos finos são os dados de treino de uma segunda
+etapa, que classifica o que a triagem mandou para revisão.
 
-O critério é **presença, não dominância**. Use `c` ou `p` somente quando o
-clipe for inteiramente aquilo; use `e` ou `o` quando aparecer, ainda que breve.
+**Seleção múltipla.** Marque todas as teclas que se aplicam ao clipe e confirme
+com Enter; apertar de novo desmarca. Um clipe de caminhada com um rearing no
+meio leva `c` e `r`.
 
-Um clipe de caminhada-rearing-caminhada leva `o`, mesmo com a caminhada ocupando
-dois terços do tempo: a pergunta é "pular este trecho perderia algo?", e ali
-perderia o rearing.
-
-Quando `e` e `o` se aplicam juntos, `e` tem prioridade: exploração é a
-variável de desfecho do NOR.
+O critério continua sendo **presença, não dominância**: marque o que aparecer,
+ainda que breve.
 
 Uso:
-    python scripts/label_clips.py --clips data/clips.csv --videos .../arenas \
-                                  --output data/clip_labels.csv
+    python scripts/label_clips.py --clips data/clips_teste.csv --videos .../arenas \\
+                                  --output data/clip_labels_teste.csv
 
 Teclas:
-    c = caminhando    p = parado    e = explorando objeto    o = outros
-    x = não dá para ver (ocluso, animal fora)
-    volta = desfazer o último    q = salvar e sair
+    c = caminhando   p = parado   e = explorando objeto
+    g = grooming     r = rearing  s = sniffing fora do objeto   o = outros
+    x = não dá para ver (exclui as demais)
+    Enter = confirmar   volta = desfazer o clipe anterior   q = salvar e sair
 """
 
 import argparse
@@ -43,8 +42,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FuncAnimation  # noqa: E402
 
 # O matplotlib tem atalhos padrão em quase todas as teclas de rótulo — p arrasta,
-# g liga a grade, r volta a visão, c e backspace navegam no histórico, o faz zoom.
-# O teclado desta janela é só da rotulagem; a barra de ferramentas segue no mouse.
+# g liga a grade, r volta a visão, s salva, o faz zoom, c e backspace navegam no
+# histórico. O teclado desta janela é só da rotulagem.
 for _keymap in [k for k in plt.rcParams if k.startswith("keymap.")]:
     plt.rcParams[_keymap] = []
 
@@ -52,12 +51,23 @@ LABELS = {
     "c": "walking",
     "p": "still",
     "e": "object_interaction",
+    "g": "grooming",
+    "r": "rearing",
+    "s": "sniffing",
     "o": "other",
     "x": "unscorable",
 }
 
-LEGEND = ("c=caminhando   p=parado   e=explorando objeto   o=outros (qualquer coisa alem disso)\n"
-          "x=nao da para ver   |   presenca, nao dominancia   |   volta=desfazer   q=sair")
+SHORT = {"c": "caminhando", "p": "parado", "e": "explorando", "g": "grooming",
+         "r": "rearing", "s": "sniffing", "o": "outros", "x": "nao da para ver"}
+
+# Ordem de prioridade para a coluna `label`, que guarda um rótulo único por
+# compatibilidade com as rodadas anteriores. `labels` guarda todos.
+PRIORITY = ("object_interaction", "rearing", "grooming", "other", "sniffing",
+            "walking", "still", "unscorable")
+
+LEGEND = ("c=caminhando  p=parado  e=explorando  g=grooming  r=rearing  s=sniffing  o=outros\n"
+          "x=nao da para ver  |  marque TODAS que aparecem  |  Enter=confirmar  volta=desfazer  q=sair")
 
 
 def read_clip(video_path: Path, start: int, end: int) -> list[np.ndarray]:
@@ -74,29 +84,47 @@ def read_clip(video_path: Path, start: int, end: int) -> list[np.ndarray]:
 
 
 def label_clip(frames, position: str):
-    state = {"label": None, "action": None}
+    state = {"selected": [], "action": None}
 
     figure, axes = plt.subplots(figsize=(11, 8))
     image = axes.imshow(frames[0])
     axes.set_axis_off()
-    axes.set_title(f"{position}\n{LEGEND}", fontsize=10)
+
+    def refresh_title():
+        chosen = " + ".join(SHORT[k] for k in state["selected"]) or "nada marcado"
+        axes.set_title(f"{position}   |   marcado: {chosen}\n{LEGEND}", fontsize=10)
 
     def update(index):
         image.set_data(frames[index % len(frames)])
         return (image,)
 
-    animation = FuncAnimation(figure, update, frames=len(frames) * 100,
-                              interval=33, blit=True, repeat=False,
+    refresh_title()
+    # blit=False: com blit o título não é redesenhado, e a seleção ficaria invisível.
+    animation = FuncAnimation(figure, update, frames=len(frames) * 200,
+                              interval=33, blit=False, repeat=False,
                               cache_frame_data=False)
 
     def on_key(event):
-        if event.key in LABELS:
-            state["label"] = LABELS[event.key]
+        key = event.key
+        if key in LABELS:
+            if key == "x":
+                state["selected"] = [] if state["selected"] == ["x"] else ["x"]
+            else:
+                if "x" in state["selected"]:
+                    state["selected"].remove("x")
+                if key in state["selected"]:
+                    state["selected"].remove(key)
+                else:
+                    state["selected"].append(key)
+            refresh_title()
+            figure.canvas.draw_idle()
+        elif key == "enter" and state["selected"]:
+            state["action"] = "confirm"
             plt.close(figure)
-        elif event.key == "backspace":
+        elif key == "backspace":
             state["action"] = "undo"
             plt.close(figure)
-        elif event.key == "q":
+        elif key == "q":
             state["action"] = "quit"
             plt.close(figure)
 
@@ -105,7 +133,12 @@ def label_clip(frames, position: str):
     if animation.event_source is not None:
         animation.event_source.stop()
 
-    return state["label"], state["action"]
+    names = [LABELS[k] for k in state["selected"]]
+    return names, state["action"]
+
+
+def primary(names) -> str:
+    return next(n for n in PRIORITY if n in names)
 
 
 def main() -> int:
@@ -120,15 +153,14 @@ def main() -> int:
     args = parser.parse_args()
 
     clips = pd.read_csv(args.clips, encoding="utf-8-sig")
-    done = {}
+    rows = []
     if args.output.exists():
-        previous = pd.read_csv(args.output, encoding="utf-8-sig")
-        done = dict(zip(previous.clip_id, previous.label))
-        print(f"{len(done)} clipes já rotulados — serão pulados\n")
+        previous = pd.read_csv(args.output, encoding="utf-8-sig").fillna("")
+        rows = previous.to_dict("records")
+        print(f"{len(rows)} clipes já rotulados — serão pulados\n")
+    done = {row["clip_id"] for row in rows}
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    rows = [{"clip_id": k, "label": v, "annotator": args.annotator} for k, v in done.items()]
     index = 0
 
     while index < len(clips):
@@ -138,42 +170,38 @@ def main() -> int:
             continue
 
         video = args.videos / f"{clip.session_id}.mp4"
-        if not video.exists():
-            print(f"  vídeo ausente: {video.name}")
-            index += 1
-            continue
-
-        frames = read_clip(video, clip.start_frame, clip.end_frame)
+        frames = read_clip(video, clip.start_frame, clip.end_frame) if video.exists() else []
         if not frames:
             print(f"  não consegui ler {clip.clip_id}")
             index += 1
             continue
 
-        label, action = label_clip(frames, f"clipe {index + 1} de {len(clips)}")
+        names, action = label_clip(frames, f"clipe {index + 1} de {len(clips)}")
 
         if action == "quit":
             break
         if action == "undo":
             if rows:
                 removed = rows.pop()
-                done.pop(removed["clip_id"], None)
+                done.discard(removed["clip_id"])
                 index = max(0, index - 1)
+                pd.DataFrame(rows).to_csv(args.output, index=False, encoding="utf-8-sig")
                 print(f"  desfeito: {removed['clip_id']}")
             continue
-        if label is None:
+        if action != "confirm":
             continue
 
-        rows.append({"clip_id": clip.clip_id, "label": label, "annotator": args.annotator})
-        done[clip.clip_id] = label
+        rows.append({"clip_id": clip.clip_id, "label": primary(names),
+                     "labels": ";".join(names), "annotator": args.annotator})
+        done.add(clip.clip_id)
         pd.DataFrame(rows).to_csv(args.output, index=False, encoding="utf-8-sig")
-        print(f"  [{len(rows)}/{len(clips)}] {clip.clip_id} -> {label}")
+        print(f"  [{len(rows)}/{len(clips)}] {clip.clip_id} -> {' + '.join(names)}")
         index += 1
 
     if rows:
         frame = pd.DataFrame(rows)
-        frame.to_csv(args.output, index=False, encoding="utf-8-sig")
         print(f"\n{len(frame)} clipes rotulados em {args.output}")
-        print(frame.label.value_counts().to_string())
+        print(frame["labels"].str.split(";").explode().value_counts().to_string())
     return 0
 
 
