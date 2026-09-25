@@ -54,7 +54,11 @@ class Thresholds:
     freezing_min_sec: float = 1.0
 
     object_margin: float = 12.0       # px além da borda do objeto
-    object_angle: float = 60.0        # graus entre a direção da cabeça e o objeto
+    # Graus entre a direção da cabeça e o centro do objeto; 180 desliga o critério.
+    # Desligado porque, nas 6 sessões rotuladas por completo, exigir 60° perdia
+    # metade da exploração marcada — o rato cheirando a lateral do objeto, com a
+    # cabeça de lado em relação ao centro. Sem ele: 92% do marcado, 91% de acerto.
+    object_angle: float = 180.0
     object_min_sec: float = 0.3
     low_activity_min_sec: float = 0.5
 
@@ -186,12 +190,21 @@ def detect_freezing(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds
     return _sustained(mask, int(round(thresholds.freezing_min_sec * fps)))
 
 
-def detect_object_interaction(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
-                              thresholds: Thresholds) -> np.ndarray:
-    """Focinho dentro da zona do objeto **e** cabeça orientada para ele.
+def object_exploration(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
+                       thresholds: Thresholds) -> dict:
+    """Exploração de cada objeto: focinho na zona do objeto.
 
-    A exigência de orientação é o que separa explorar de apenas passar perto — e
-    é a razão de o conjunto de pontos incluir as orelhas.
+    Havia também a exigência de a cabeça apontar para o centro, pensada para
+    separar explorar de passar perto. A marcação manual de sessões completas
+    mostrou o contrário: com ela, a regra pegava 47% do tempo marcado; sem ela,
+    92%, com o mesmo acerto (91%) e em todas as sessões. O critério continua
+    disponível em `object_angle`.
+
+    Usa a coordenada do focinho mesmo com confiança baixa: perto do objeto o
+    focinho some parcialmente, mas o palpite do modelo ainda cai no lugar certo —
+    descartá-lo derrubava a cobertura para 74%.
+
+    Separado por objeto porque o resultado do NOR é a preferência entre eles.
     """
     nose_x = pose["nose_x"].to_numpy(float)
     nose_y = pose["nose_y"].to_numpy(float)
@@ -199,8 +212,9 @@ def detect_object_interaction(pose: pd.DataFrame, objects: pd.DataFrame, fps: fl
 
     head_norm = np.hypot(head_dx, head_dy)
     cos_limit = np.cos(np.deg2rad(thresholds.object_angle))
+    min_frames = int(round(thresholds.object_min_sec * fps))
 
-    mask = np.zeros(len(pose), dtype=bool)
+    masks = {}
     for obj in objects.itertuples():
         to_x = obj.center_x - nose_x
         to_y = obj.center_y - nose_y
@@ -208,13 +222,24 @@ def detect_object_interaction(pose: pd.DataFrame, objects: pd.DataFrame, fps: fl
 
         near = distance <= obj.radius + thresholds.object_margin
 
-        with np.errstate(invalid="ignore", divide="ignore"):
-            cosine = (head_dx * to_x + head_dy * to_y) / (head_norm * distance)
-        facing = np.nan_to_num(cosine, nan=-1.0) >= cos_limit
+        if thresholds.object_angle >= 180.0:
+            facing = np.ones(len(pose), dtype=bool)
+        else:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                cosine = (head_dx * to_x + head_dy * to_y) / (head_norm * distance)
+            facing = np.nan_to_num(cosine, nan=-1.0) >= cos_limit
 
-        mask |= near & facing
+        masks[int(getattr(obj, "object_id", len(masks) + 1))] = _sustained(near & facing, min_frames)
+    return masks
 
-    return _sustained(mask, int(round(thresholds.object_min_sec * fps)))
+
+def detect_object_interaction(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
+                              thresholds: Thresholds) -> np.ndarray:
+    """Exploração de qualquer objeto."""
+    mask = np.zeros(len(pose), dtype=bool)
+    for explored in object_exploration(pose, objects, fps, thresholds).values():
+        mask |= explored
+    return mask
 
 
 def detect_low_activity(kinematics: pd.DataFrame, fps: float, thresholds: Thresholds,

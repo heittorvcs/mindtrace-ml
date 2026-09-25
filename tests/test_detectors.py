@@ -119,16 +119,18 @@ class TestObjectInteraction:
 
         assert mask.all()
 
-    def test_near_but_facing_away_does_not_count(self):
-        # Mesma posição, cabeça apontando para baixo — passar perto não é explorar.
+    def test_head_angle_is_off_by_default(self):
+        # Mesma posição, cabeça apontando para longe do centro. Nas sessões
+        # rotuladas, exigir orientação perdia o rato cheirando a lateral do objeto.
         n = 30
         pose = make_pose(n, body_xy=[(100.0, 100.0)] * n,
                          nose_xy=[(100.0, 62.0)] * n,
                          ears=[((96.0, 50.0), (104.0, 50.0))] * n)
 
-        mask = detect_object_interaction(pose, self.objects, FPS, Thresholds())
+        assert detect_object_interaction(pose, self.objects, FPS, Thresholds()).all()
 
-        assert not mask.any()
+        strict = Thresholds(object_angle=60.0)
+        assert not detect_object_interaction(pose, self.objects, FPS, strict).any()
 
     def test_facing_but_far_does_not_count(self):
         n = 30

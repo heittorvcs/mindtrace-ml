@@ -17,3 +17,6 @@ models/
 data/pose/*
 !data/pose/.gitkeep
 data/objects.csv
+
+# Saída da camada de movimento: derivada da pose, regenerável.
+data/movement/
