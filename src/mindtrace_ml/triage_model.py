@@ -67,6 +67,9 @@ _STATS = {
     "p10": lambda v: np.nanpercentile(v, 10, axis=1),
     "p90": lambda v: np.nanpercentile(v, 90, axis=1),
     "std": lambda v: np.nanstd(v, axis=1),
+    # Segunda metade da janela menos a primeira: subindo ou descendo, e não só o nível.
+    "trend": lambda v: (np.nanmean(v[:, v.shape[1] // 2:], axis=1)
+                        - np.nanmean(v[:, :v.shape[1] // 2], axis=1)),
 }
 
 

@@ -98,3 +98,23 @@ class TestPersistence:
         saved = pd.read_csv(path, encoding="utf-8-sig")
         assert len(saved) == 2
         assert saved.set_index("session_id").loc["TT_22_cam1", "end_frame"] == 12
+
+
+class TestSuggestions:
+    def test_accepted_suggestion_can_be_undone(self):
+        annotation = Annotation()
+
+        annotation.add("rearing", 100, 140)
+        assert annotation.intervals == [("rearing", 100, 140)]
+
+        annotation.undo()
+        assert annotation.intervals == []
+
+    def test_delete_only_touches_the_behavior_being_labeled(self):
+        # Sessão já rotulada por completo, reaberta só para rearing: apagar sob o
+        # cursor não pode levar junto a exploração marcada antes.
+        annotation = Annotation([("object_interaction", 0, 100), ("rearing", 40, 60)])
+
+        assert annotation.remove_at(50, allowed={"rearing"}) == ("rearing", 40, 60)
+        assert annotation.remove_at(50, allowed={"rearing"}) is None
+        assert annotation.intervals == [("object_interaction", 0, 100)]

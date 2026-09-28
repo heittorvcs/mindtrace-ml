@@ -15,14 +15,28 @@ Salva a cada marcação. Reabrir a mesma sessão continua de onde parou; o quant
 já foi assistido fica em `session_progress.csv`, porque ausência de marcação só
 significa ausência de comportamento no trecho que foi de fato visto.
 
+**Só um comportamento** (`--only rearing`): as outras teclas somem e a sessão
+fica registrada como rotulada só para ele — para os outros comportamentos, ela
+continua sem rótulo, e não como "não aconteceu".
+
+**Com sugestões** (`--suggest modelo.joblib`): os episódios que o modelo achou
+aparecem numa linha própria. `a` aceita a sugestão sob o cursor, `n`/`p` pulam
+para a próxima/anterior; o que não for aceito é descartado. Assista ao vídeo
+inteiro mesmo assim — é o que acha os rearings que o modelo perdeu. A sessão
+fica marcada como assistida e não entra na medida de quanto o modelo acha: ver
+a sugestão antes induz a concordar com ela.
+
 Uso:
     python scripts/label_session.py --session TT_22_cam1 --videos .../arenas
+    python scripts/label_session.py --session TT_10_cam3 --videos .../arenas \
+        --only rearing --suggest models/rearing_model.joblib
 
 Teclas:
     espaço = tocar/pausar   ← → = um quadro   shift+← → = 2 s   ↑ ↓ = velocidade
     e = explorando objeto   g = grooming   s = sniffing fora do objeto
     r = rearing   o = outro comportamento notável   x = não dá para ver
     volta = desfaz a última ação   delete = apaga o intervalo sob o cursor
+    a = aceita a sugestão sob o cursor   n / p = próxima / anterior sugestão
     clique na linha do tempo = pula para lá   q = salvar e sair
 """
 
@@ -55,6 +69,7 @@ COLORS = {"object_interaction": "#2e86de", "grooming": "#e67e22", "sniffing": "#
 SPEEDS = (0.25, 0.5, 1.0, 2.0, 4.0)
 SCALE = 2
 ZOOM_SEC = 20
+FPS = 29.97
 
 
 class Annotation:
@@ -75,10 +90,17 @@ class Annotation:
             self.open[behavior] = frame
             self.history.append(("open", behavior, frame))
 
-    def remove_at(self, frame: int) -> tuple | None:
+    def add(self, behavior: str, start: int, end: int) -> None:
+        """Intervalo pronto, como uma sugestão aceita."""
+        self.intervals.append((behavior, int(start), int(end)))
+        self.history.append(("add", behavior, None))
+
+    def remove_at(self, frame: int, allowed=None) -> tuple | None:
         """Apaga o intervalo mais recente que contém o quadro."""
         for index in range(len(self.intervals) - 1, -1, -1):
             behavior, start, end = self.intervals[index]
+            if allowed is not None and behavior not in allowed:
+                continue
             if start <= frame <= end:
                 removed = self.intervals.pop(index)
                 self.history.append(("remove", index, removed))
@@ -97,6 +119,8 @@ class Annotation:
             self.open[first] = second
         elif action == "remove":
             self.intervals.insert(first, second)
+        elif action == "add":
+            self.intervals.pop()
         return action
 
     def close_all(self, frame: int) -> list[str]:
@@ -154,9 +178,13 @@ class Video:
 
 class App:
     def __init__(self, root, video: Video, annotation: Annotation, session_id: str,
-                 annotator: str, output: Path, progress: Path, watched: int):
+                 annotator: str, output: Path, progress: Path, watched: int,
+                 keys: dict = KEYS, suggestions=(), assisted: bool = False):
         import tkinter as tk
 
+        self.keys = keys
+        self.suggestions = sorted(suggestions)
+        self.assisted = assisted
         self.root, self.video, self.annotation = root, video, annotation
         self.session_id, self.annotator = session_id, annotator
         self.output, self.progress = output, progress
@@ -172,14 +200,16 @@ class App:
         self.status = tk.Label(root, font=("Consolas", 11), anchor="w", justify="left")
         self.status.pack(fill="x", padx=8, pady=(6, 0))
         self.timeline_width = width
-        rows = len(KEYS)
+        rows = len(self.keys) + bool(self.suggestions)
         self.full = tk.Canvas(root, width=width, height=14 * rows + 16, bg="#f4f4f4", highlightthickness=0)
         self.full.pack(pady=(6, 0))
         self.zoom = tk.Canvas(root, width=width, height=14 * rows + 16, bg="#ffffff", highlightthickness=0)
         self.zoom.pack(pady=(4, 0))
+        legend = "  ".join(f"{key}={SHORT[name]}" for key, name in self.keys.items())
+        if self.suggestions:
+            legend += "   |   a=aceitar sugestao  n/p=proxima/anterior"
         tk.Label(root, font=("Consolas", 10), justify="left", anchor="w", text=(
-            "e=explorando  g=grooming  s=sniffing  r=rearing  o=outro  x=nao da p/ ver"
-            "   (aperte para abrir, de novo para fechar)\n"
+            f"{legend}   (aperte para abrir, de novo para fechar)\n"
             "espaco=tocar/pausar  <- ->=1 quadro  shift+<- ->=2 s  cima/baixo=velocidade  "
             "volta=desfazer  delete=apagar intervalo  q=sair")).pack(fill="x", padx=8, pady=6)
 
@@ -247,8 +277,30 @@ class App:
         elif key in ("Up", "Down"):
             index = SPEEDS.index(self.speed) + (1 if key == "Up" else -1)
             self.speed = SPEEDS[int(np.clip(index, 0, len(SPEEDS) - 1))]
-        elif key.lower() in KEYS:
-            behavior = KEYS[key.lower()]
+        elif key.lower() == "a" and self.suggestions:
+            hit = next(((a, b) for a, b in self.suggestions if a <= frame <= b), None)
+            if hit:
+                behavior = next(v for v in self.keys.values() if v != "unscorable")
+                self.annotation.add(behavior, *hit)
+                self.message = f"sugestão aceita: {hit[0]}–{hit[1]}"
+                self.save()
+            else:
+                self.message = "nenhuma sugestão sob o cursor"
+        elif key.lower() in ("n", "p") and self.suggestions:
+            self.play(False)
+            # Para um segundo antes: é o começo do movimento que decide.
+            lead = int(round(self.video.fps))
+            if key.lower() == "n":
+                target = next((a for a, _ in self.suggestions if a - lead > frame), None)
+            else:
+                target = next((a for a, _ in reversed(self.suggestions) if a - lead < frame), None)
+            if target is None:
+                self.message = "não há mais sugestões nessa direção"
+            else:
+                self.seek(max(0, target - lead))
+                return
+        elif key.lower() in self.keys:
+            behavior = self.keys[key.lower()]
             was_open = behavior in self.annotation.open
             self.annotation.toggle(behavior, frame)
             self.message = f"{SHORT[behavior]} {'fechado' if was_open else 'aberto'} no quadro {frame}"
@@ -258,7 +310,7 @@ class App:
             self.message = f"desfeito: {action}" if action else "nada para desfazer"
             self.save()
         elif key == "Delete":
-            removed = self.annotation.remove_at(frame)
+            removed = self.annotation.remove_at(frame, allowed=set(self.keys.values()))
             self.message = (f"apagado: {SHORT[removed[0]]} {removed[1]}–{removed[2]}"
                             if removed else "nenhum intervalo sob o cursor")
             self.save()
@@ -301,7 +353,15 @@ class App:
 
         # Faixa do que já foi assistido: fora dela, "sem marcação" não quer dizer nada.
         canvas.create_rectangle(0, 0, x(min(self.watched, last)), 4, fill="#95a5a6", width=0)
-        for row, behavior in enumerate(KEYS.values()):
+        offset = 0
+        if self.suggestions:
+            offset = 1
+            canvas.create_text(4, 14, text="sugestoes", anchor="w", font=("Consolas", 8), fill="#999999")
+            for start, end in self.suggestions:
+                if end >= first and start <= last:
+                    canvas.create_rectangle(x(start), 8, max(x(end), x(start) + 2), 19,
+                                            fill="#f1c40f", stipple="gray50", width=0)
+        for row, behavior in enumerate(self.keys.values(), start=offset):
             top = 8 + 14 * row
             canvas.create_text(4, top + 6, text=SHORT[behavior], anchor="w",
                                font=("Consolas", 8), fill="#999999")
@@ -315,15 +375,18 @@ class App:
                 canvas.create_rectangle(x(low), top, max(x(high), x(low) + 2), top + 11,
                                         fill=COLORS[behavior], stipple="gray50", width=0)
         cursor = x(self.video.position)
-        canvas.create_line(cursor, 0, cursor, 14 * len(KEYS) + 16, fill="black", width=2)
+        canvas.create_line(cursor, 0, cursor, 14 * (len(self.keys) + offset) + 16, fill="black", width=2)
 
     # --- persistência ------------------------------------------------------
     def save(self) -> None:
         replace_rows(self.output, self.annotation.rows(self.session_id, self.annotator),
                      self.session_id, self.annotator)
+        # Quais comportamentos foram rotulados: para os outros, a sessão não diz nada.
         progress = pd.DataFrame([{"session_id": self.session_id, "annotator": self.annotator,
                                   "watched_until": int(self.watched),
-                                  "n_frames": int(self.video.count)}])
+                                  "n_frames": int(self.video.count),
+                                  "behaviors": ";".join(self.keys.values()),
+                                  "assisted": self.assisted}])
         replace_rows(self.progress, progress, self.session_id, self.annotator)
 
     def quit(self) -> None:
@@ -333,6 +396,21 @@ class App:
         if closed:
             print(f"fechados no quadro {self.video.position}: {', '.join(closed)}")
         self.root.destroy()
+
+
+def model_suggestions(args, behavior: str) -> list[tuple[int, int]]:
+    """Episódios que o modelo salvo acha nesta sessão, em quadros do vídeo."""
+    import joblib
+    from mindtrace_ml.behavior_model import bouts, detect, session_features
+
+    bundle = joblib.load(args.suggest)
+    pose = pd.read_csv(args.pose / f"{args.session}.csv", encoding="utf-8-sig")
+    objects = pd.read_csv(args.objects, encoding="utf-8-sig")
+    pixels = pd.read_csv(args.video_features / f"{args.session}.csv", encoding="utf-8-sig")
+    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels)
+    frames = session["frames"]
+    return [(int(frames[a]), int(frames[b]))
+            for a, b in bouts(detect(bundle, behavior, session, FPS))]
 
 
 def main() -> int:
@@ -345,7 +423,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "session_labels.csv")
     parser.add_argument("--progress", type=Path, default=ROOT / "data" / "session_progress.csv")
     parser.add_argument("--annotator", default="heittor")
+    parser.add_argument("--only", choices=[b for b in KEYS.values() if b != "unscorable"], default=None,
+                        help="rotula só este comportamento (e 'não dá para ver')")
+    parser.add_argument("--suggest", type=Path, default=None,
+                        help="modelo salvo por train_behavior_model: mostra os episódios que ele acha")
+    parser.add_argument("--pose", type=Path, default=ROOT / "data" / "pose")
+    parser.add_argument("--objects", type=Path, default=ROOT / "data" / "objects.csv")
+    parser.add_argument("--video-features", type=Path, default=ROOT / "data" / "video_features")
     args = parser.parse_args()
+
+    keys = KEYS
+    if args.only:
+        keys = {k: v for k, v in KEYS.items() if v in (args.only, "unscorable")}
 
     path = args.videos / f"{args.session}.mp4"
     if not path.exists():
@@ -364,10 +453,17 @@ def main() -> int:
     if intervals or watched:
         print(f"continuando: {len(intervals)} intervalos, assistido até o quadro {watched}")
 
+    suggestions = []
+    if args.suggest:
+        behavior = args.only or "rearing"
+        suggestions = model_suggestions(args, behavior)
+        print(f"{len(suggestions)} sugestões de {behavior} do modelo")
+
     import tkinter as tk
     root = tk.Tk()
     app = App(root, Video(path), Annotation(intervals), args.session, args.annotator,
-              args.output, args.progress, watched)
+              args.output, args.progress, watched, keys=keys, suggestions=suggestions,
+              assisted=bool(args.suggest))
     if watched:
         app.seek(watched)
     root.mainloop()

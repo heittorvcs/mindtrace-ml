@@ -45,6 +45,11 @@ def compare_exploration(layers: dict, labels: pd.DataFrame, progress: pd.DataFra
         done = progress[progress.session_id == session]
         if done.empty:
             continue
+        # Sessão rotulada só para outro comportamento (ex.: --only rearing) não
+        # tem exploração marcada: compará-la mediria a regra contra o vazio.
+        if "behaviors" in done and done.behaviors.notna().all() and \
+                not done.behaviors.str.contains("object_interaction").any():
+            continue
         # Só o trecho assistido: depois dele, "sem marcação" não quer dizer nada.
         seen = layer.frame.to_numpy() <= int(done.watched_until.max())
         marked = intervals_to_mask(bouts_for(labels[labels.session_id == session], "object_interaction"),

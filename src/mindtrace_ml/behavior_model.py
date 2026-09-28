@@ -21,9 +21,11 @@ muitas vezes misturado a outros comportamentos, e de pouco valor para o NOR.
 import numpy as np
 import pandas as pd
 
-from .detectors import _sustained
+from .detectors import Thresholds, _sustained, triage
+from .kinematics import frame_kinematics
 from .labels import bouts_for, intervals_to_mask
-from .triage_model import SPEC, describe
+from .triage_model import KEYPOINTS, SPEC, describe, frame_signals
+from .video_features import pose_rise_signals
 
 BEHAVIORS = ("grooming", "rearing")
 
@@ -42,19 +44,33 @@ EXTRA_SPEC = {
     "nose_rel_y": ("median", "p10", "p90"),
     "length_local": ("median", "p10", "std"),
 }
-SCALES = (15, 60)        # quadros: ~0,5 s e 2 s a 30 fps
+SCALES = (15, 60, 120)   # quadros: ~0,5 s, 2 s e 4 s a 30 fps
 STEP = 8                 # uma janela a cada ~0,27 s
 MIN_BOUT_SEC = 0.3
+
+
+# Sinais em que importa a direção da mudança dentro da janela, não só o nível.
+# Um rearing tem forma — sobe, fica, desce —, e o resumo por mediana e quantis
+# não distingue o corpo encurtando do corpo voltando ao normal.
+TREND_SIGNALS = ("length_local", "blob_height", "blob_width", "blob_aspect", "blob_area",
+                 "blob_dy", "neck_rel_y", "nose_rel_y", "full_length", "body_length",
+                 "conf_nose", "motion_body", "body_speed", "wall_distance")
+
+
+def behavior_spec(signals: pd.DataFrame) -> dict:
+    """Sinais da triagem, mais os extras presentes, com tendência onde ela importa."""
+    spec = {**SPEC, **{k: v for k, v in EXTRA_SPEC.items() if k in signals}}
+    return {k: (*v, "trend") if k in TREND_SIGNALS else v for k, v in spec.items()}
 
 
 def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES,
                       spec: dict | None = None) -> pd.DataFrame:
     """Features de janelas centradas em cada quadro de `centers` (índices de linha).
 
-    Sem `spec`, usa os sinais da triagem e mais os extras que estiverem em `signals`.
+    A janela de 4 s dá o contexto do episódio inteiro: um rearing curto é uma
+    subida e uma descida dentro dela, que a janela de 2 s mal abrange.
     """
-    if spec is None:
-        spec = {**SPEC, **{k: v for k, v in EXTRA_SPEC.items() if k in signals}}
+    spec = spec or behavior_spec(signals)
     matrix = signals[list(spec)].to_numpy(float)
     parts = []
     for size in scales:
@@ -68,6 +84,32 @@ def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES,
         block.columns = [f"w{size}_{c}" for c in block.columns]
         parts.append(block)
     return pd.concat(parts, axis=1)
+
+
+def session_features(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
+                     pixels: pd.DataFrame | None = None) -> dict:
+    """Tudo o que os detectores precisam de uma sessão.
+
+    `pixels` é o cache de extract_video_features; sem ele, só sinais de pose.
+    """
+    kinematics = frame_kinematics(pose, KEYPOINTS, fps)
+    triaged = triage(pose, kinematics, objects, fps, Thresholds())
+    signals = frame_signals(pose, kinematics, triaged, objects, fps)
+    if pixels is not None:
+        signals = pd.concat([signals, pixels.drop(columns="frame", errors="ignore").reset_index(drop=True),
+                             pose_rise_signals(pose, kinematics, fps)], axis=1)
+    centers = window_centers(len(pose))
+    return {"frames": pose["frame"].to_numpy(), "triaged": triaged, "centers": centers,
+            "freezing": triaged["freezing"].to_numpy(bool),
+            "X": centered_features(signals, centers)}
+
+
+def detect(bundle: dict, behavior: str, session: dict, fps: float) -> np.ndarray:
+    """Episódios por quadro de um comportamento, com o modelo e o limiar salvos."""
+    scores = bundle["models"][behavior].predict_proba(session["X"][bundle["features"]])[:, 1]
+    mask = frame_mask(scores, session["centers"], len(session["frames"]),
+                      bundle["thresholds"][behavior], fps)
+    return gate(behavior, mask, session["freezing"], fps)
 
 
 def window_centers(n_frames: int, step: int = STEP) -> np.ndarray:

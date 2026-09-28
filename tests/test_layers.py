@@ -65,7 +65,7 @@ class TestBehaviorWindows:
         signals = signals_for(wandering_pose())
         centers = np.array([40, 100])
 
-        features = centered_features(signals, centers, scales=(15,))
+        features = centered_features(signals, centers, scales=(15,), spec=SPEC)
 
         matrix = signals[list(SPEC)].to_numpy(float)
         expected = describe(np.stack([matrix[33:48], matrix[93:108]]))
@@ -111,3 +111,10 @@ class TestBehaviorWindows:
 
         assert bouts(gate("grooming", detected, freezing, FPS)) == [(10, 29)]
         assert bouts(gate("rearing", detected, freezing, FPS)) == [(10, 59)]
+
+    def test_trend_says_which_way_the_signal_moves(self):
+        rising = np.tile(np.arange(10.0), (1, 1))[..., None]      # 1 janela, 10 quadros, 1 sinal
+
+        features = describe(rising, {"x": ("trend",)})
+
+        assert features["x_trend"].iloc[0] == 5.0
