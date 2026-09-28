@@ -26,14 +26,36 @@ from .labels import bouts_for, intervals_to_mask
 from .triage_model import SPEC, describe
 
 BEHAVIORS = ("grooming", "rearing")
+
+# Sinais além dos da triagem: pixels do vídeo e a geometria do levantar
+# (video_features.py). Entram só quando o cache de vídeo existe.
+EXTRA_SPEC = {
+    "motion_head": ("median", "p90"),
+    "motion_body": ("median", "p90"),
+    "motion_ratio": ("median", "p90"),
+    "blob_area": ("median", "p10", "p90"),
+    "blob_height": ("median", "p10", "p90"),
+    "blob_width": ("median", "p10", "p90"),
+    "blob_aspect": ("median", "p10", "p90"),
+    "blob_dy": ("median", "p10", "p90"),
+    "neck_rel_y": ("median", "p10", "p90"),
+    "nose_rel_y": ("median", "p10", "p90"),
+    "length_local": ("median", "p10", "std"),
+}
 SCALES = (15, 60)        # quadros: ~0,5 s e 2 s a 30 fps
 STEP = 8                 # uma janela a cada ~0,27 s
 MIN_BOUT_SEC = 0.3
 
 
-def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES) -> pd.DataFrame:
-    """Features de janelas centradas em cada quadro de `centers` (índices de linha)."""
-    matrix = signals[list(SPEC)].to_numpy(float)
+def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES,
+                      spec: dict | None = None) -> pd.DataFrame:
+    """Features de janelas centradas em cada quadro de `centers` (índices de linha).
+
+    Sem `spec`, usa os sinais da triagem e mais os extras que estiverem em `signals`.
+    """
+    if spec is None:
+        spec = {**SPEC, **{k: v for k, v in EXTRA_SPEC.items() if k in signals}}
+    matrix = signals[list(spec)].to_numpy(float)
     parts = []
     for size in scales:
         half = size // 2
@@ -42,7 +64,7 @@ def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES)
         padded = np.vstack([np.full((half, matrix.shape[1]), np.nan), matrix,
                             np.full((size, matrix.shape[1]), np.nan)])
         index = centers[:, None] + np.arange(size)[None, :]
-        block = describe(padded[index])
+        block = describe(padded[index], spec)
         block.columns = [f"w{size}_{c}" for c in block.columns]
         parts.append(block)
     return pd.concat(parts, axis=1)

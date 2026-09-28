@@ -39,6 +39,7 @@ from mindtrace_ml.detectors import Thresholds, triage  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 from mindtrace_ml.labels import bouts_for, intervals_to_mask  # noqa: E402
 from mindtrace_ml.triage_model import KEYPOINTS, animal_of, frame_signals, label_sets  # noqa: E402
+from mindtrace_ml.video_features import pose_rise_signals  # noqa: E402
 
 CLIP_ROUNDS = (
     ("r1", "data/clip_labels.csv", "data/clips_gabarito.csv"),
@@ -48,12 +49,22 @@ CLIP_ROUNDS = (
 )
 
 
-def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float) -> dict:
+VIDEO_FEATURES = ROOT / "data" / "video_features"
+
+
+def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
+            video: bool = True) -> dict:
     pose = pd.read_csv(pose_dir / f"{session}.csv", encoding="utf-8-sig")
     session_objects = objects[objects.session_id == session]
     kinematics = frame_kinematics(pose, KEYPOINTS, fps)
     triaged = triage(pose, kinematics, session_objects, fps, Thresholds())
     signals = frame_signals(pose, kinematics, triaged, session_objects, fps)
+    cached = VIDEO_FEATURES / f"{session}.csv"
+    if video:
+        if not cached.exists():
+            raise FileNotFoundError(f"{cached}: rode extract_video_features.py (ou use --no-video)")
+        pixels = pd.read_csv(cached, encoding="utf-8-sig").drop(columns="frame")
+        signals = pd.concat([signals, pixels, pose_rise_signals(pose, kinematics, fps)], axis=1)
     centers = window_centers(len(pose))
     return {"frames": pose["frame"].to_numpy(), "triaged": triaged, "centers": centers,
             "freezing": triaged["freezing"].to_numpy(bool),
@@ -141,6 +152,8 @@ def main() -> int:
     parser.add_argument("--labels", type=Path, default=ROOT / "data" / "session_labels.csv")
     parser.add_argument("--progress", type=Path, default=ROOT / "data" / "session_progress.csv")
     parser.add_argument("--save", type=Path, default=None)
+    parser.add_argument("--no-video", action="store_true",
+                        help="só sinais de pose, sem os de pixel — para comparar")
     args = parser.parse_args()
 
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
@@ -151,7 +164,7 @@ def main() -> int:
     print(f"preparando {len(labeled)} sessões rotuladas ", end="", flush=True)
     sessions = {}
     for session in labeled:
-        data = prepare(args.pose, session, objects, args.fps)
+        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
         watched = int(progress[progress.session_id == session].watched_until.max())
         data["seen"] = data["centers"] <= watched
         data["y"] = targets(labels[labels.session_id == session], data["frames"], data["centers"])
@@ -217,7 +230,7 @@ def main() -> int:
     masks = {behavior: {} for behavior in BEHAVIORS}
     head = {}
     for session in sorted(clips.session_id.unique()):
-        data = prepare(args.pose, session, objects, args.fps)
+        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
         n = len(data["frames"])
         for behavior in BEHAVIORS:
             scores = final[behavior].predict_proba(data["X"])[:, 1]

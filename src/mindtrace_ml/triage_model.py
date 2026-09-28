@@ -173,13 +173,16 @@ def frame_signals(pose: pd.DataFrame, kinematics: pd.DataFrame, triaged: pd.Data
     return out
 
 
-def describe(block: np.ndarray) -> pd.DataFrame:
-    """Resume janelas em features. `block` tem forma (janelas, quadros, sinais)."""
+def describe(block: np.ndarray, spec: dict = SPEC) -> pd.DataFrame:
+    """Resume janelas em features. `block` tem forma (janelas, quadros, sinais).
+
+    Os sinais do bloco vêm na ordem das chaves de `spec`.
+    """
     columns = {}
     with warnings.catch_warnings():
         # Janela inteira sem pose num sinal dá NaN, que o modelo trata como ausente.
         warnings.simplefilter("ignore", RuntimeWarning)
-        for index, (name, stats) in enumerate(SPEC.items()):
+        for index, (name, stats) in enumerate(spec.items()):
             values = block[:, :, index]
             for stat in stats:
                 columns[f"{name}_{stat}"] = _STATS[stat](values)
