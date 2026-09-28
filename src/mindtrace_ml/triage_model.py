@@ -39,6 +39,10 @@ STILL = frozenset({"still", "freezing", "low_activity"})
 
 RULE_COLUMNS = (*BEHAVIOR_ORDER, *REVIEW_FLAGS, "unscorable")
 
+# Distância ao objeto numa arena sem objetos: maior que qualquer uma possível
+# numa arena de 360×240.
+NO_OBJECT_DISTANCE = 1000.0
+
 # Estatísticas por sinal. Quantis em vez de mínimo e máximo: os clipes das
 # primeiras rodadas têm 3 s e os da de teste 2 s, e o máximo cresce com o tamanho
 # da janela — o p90 muito menos.
@@ -93,9 +97,15 @@ def notable_set(sniffing_is_notable: bool = False) -> frozenset:
     return NOTABLE | ({"sniffing"} if sniffing_is_notable else frozenset())
 
 
-def animal_of(session_id: str) -> int:
-    """TR_22_cam1 e TT_22_cam1 são o mesmo animal, em dias diferentes."""
-    return int(session_id.split("_")[1])
+def animal_of(session_id: str) -> int | str:
+    """TR_22_cam1 e TT_22_cam1 são o mesmo animal, em dias diferentes.
+
+    Coortes com numeração própria levam prefixo (HD1_F3_cam1 é a fêmea 3 da
+    habituação), e aí o animal é o texto, para não se confundir com o animal 3
+    do NOR.
+    """
+    token = session_id.split("_")[1]
+    return int(token) if token.isdigit() else token
 
 
 def _position(kinematics: pd.DataFrame, name: str) -> tuple[np.ndarray, np.ndarray]:
@@ -158,7 +168,9 @@ def frame_signals(pose: pd.DataFrame, kinematics: pd.DataFrame, triaged: pd.Data
 
     distances = [np.hypot(o.center_x - nose[0], o.center_y - nose[1]) - o.radius
                  for o in objects.itertuples()]
-    out["object_distance"] = np.min(distances, axis=0) if distances else np.nan
+    # Sem objetos na arena (habituação), o focinho está sempre longe de qualquer um.
+    # NaN diria outra coisa — "focinho não detectado" —, e o modelo aprendeu isso.
+    out["object_distance"] = np.min(distances, axis=0) if distances else NO_OBJECT_DISTANCE
 
     # A arena não está marcada; o animal a percorre inteira ao longo da sessão,
     # então os percentis extremos da posição do dorso aproximam as paredes.

@@ -97,10 +97,9 @@ def main() -> int:
 
     layers, rows = {}, []
     for path in sorted(args.pose.glob("*.csv")):
+        # Sem objetos marcados (habituação, ou NOR ainda por marcar): movimento
+        # e freezing saem igual; só não há exploração.
         session_objects = objects[objects.session_id == path.stem]
-        if session_objects.empty:
-            print(f"  {path.stem}: sem objetos marcados, pulada")
-            continue
         pose = pd.read_csv(path, encoding="utf-8-sig")
         layer = movement_layer(pose, frame_kinematics(pose, KEYPOINTS, args.fps),
                                session_objects, args.fps)
@@ -113,8 +112,9 @@ def main() -> int:
         summary["below_min_exploration"] = summary.exploration_total_s < args.min_exploration
     summary.to_csv(args.output / "resumo.csv", index=False, encoding="utf-8-sig")
 
-    columns = ["session_id", "moving_pct", "freezing_pct", "distance_px",
-               "exploration_1_s", "exploration_2_s", "exploration_total_s"]
+    columns = [c for c in ("session_id", "moving_pct", "freezing_pct", "distance_px",
+                           "exploration_1_s", "exploration_2_s", "exploration_total_s")
+               if c in summary]
     print(summary[columns].to_string(index=False))
     print(f"\n{len(summary)} sessões | por quadro e resumo em {args.output}")
 

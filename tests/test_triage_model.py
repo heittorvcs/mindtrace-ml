@@ -106,3 +106,7 @@ class TestLabels:
 
     def test_train_and_test_days_are_the_same_animal(self):
         assert animal_of("TR_22_cam1") == animal_of("TT_22_cam1") == 22
+
+    def test_cohorts_with_their_own_numbering_do_not_collide(self):
+        assert animal_of("HD1_F3_cam1") == animal_of("HD5_F3_cam1") == "F3"
+        assert animal_of("HD1_F3_cam1") != animal_of("TT_3_cam1")

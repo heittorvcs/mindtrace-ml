@@ -8,6 +8,12 @@ O nome do arquivo carrega os animais por posição: "TR 19-20-21.MPG" são os
 animais 19, 20 e 21 nas câmeras 1, 2 e 3; "TT 15-X-17.MPG" tem a câmera 2 vazia.
 Arenas marcadas com X são puladas.
 
+A habituação usa o mesmo DVR com duas arenas: "Dia 1 - 1-2.MPG" é o dia 1, com o
+animal 1 na posição da câmera 1 e o 2 na da câmera 2. Vira a fase "HD1". Como a
+numeração dos animais recomeça em cada coorte, `--animal-prefix` os distingue
+dos do NOR: com "F", a fêmea 1 vira "F1" e não se confunde com o animal 1 do NOR
+na hora de separar treino e teste por animal.
+
 Uso:
     python scripts/split_arenas.py --input  C:/Users/heitt/Documents/videos_lab \
                                    --output C:/Users/heitt/Documents/videos_lab/arenas
@@ -29,19 +35,27 @@ CAMERA_OFFSETS = {1: (0, 0), 2: (360, 0), 3: (0, 240)}
 QUADRANT_WIDTH, QUADRANT_HEIGHT = 360, 240
 
 NAME_PATTERN = re.compile(r"^(?P<phase>[A-Z]{2})\s+(?P<ids>[\dX]+(?:-[\dX]+)*)", re.IGNORECASE)
+DAY_PATTERN = re.compile(r"^Dia\s*(?P<day>\d+)\s*-\s*(?P<ids>[\dX]+(?:-[\dX]+)*)", re.IGNORECASE)
 
 
-def parse_name(stem: str):
-    """'TR 19-20-21' -> ('TR', {1: '19', 2: '20', 3: '21'}); X vira None."""
+def parse_name(stem: str, prefix: str = ""):
+    """'TR 19-20-21' -> ('TR', {1: '19', 2: '20', 3: '21'}); X vira None.
+
+    'Dia 1 - 1-2' -> ('HD1', {1: '1', 2: '2'}), com `prefix` antes de cada animal.
+    """
     match = NAME_PATTERN.match(stem.strip())
+    phase = match.group("phase").upper() if match else None
     if not match:
-        return None, {}
+        match = DAY_PATTERN.match(stem.strip())
+        if not match:
+            return None, {}
+        phase = f"HD{match.group('day')}"
 
     parts = match.group("ids").split("-")
     animals = {}
     for index, part in enumerate(parts[:3], start=1):
-        animals[index] = None if part.upper() == "X" else part
-    return match.group("phase").upper(), animals
+        animals[index] = None if part.upper() == "X" else f"{prefix}{part}"
+    return phase, animals
 
 
 def file_digest(path: Path) -> str:
@@ -111,6 +125,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-existing", action="store_true",
                         help="retoma sem refazer o que já foi cortado")
+    parser.add_argument("--animal-prefix", default="",
+                        help="distingue coortes com numeração própria (ex.: F para as fêmeas da habituação)")
     args = parser.parse_args()
 
     sources = sorted(p for p in args.input.iterdir() if p.suffix.upper() == ".MPG")
@@ -135,7 +151,7 @@ def main() -> int:
             continue
         seen_digests[digest] = source.name
 
-        phase, animals = parse_name(source.stem)
+        phase, animals = parse_name(source.stem, args.animal_prefix)
         if phase is None:
             print(f"  ?  {source.name} — nome fora do padrão, pulado")
             continue
