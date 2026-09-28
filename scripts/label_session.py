@@ -33,8 +33,8 @@ Uso:
 
 Teclas:
     espaço = tocar/pausar   ← → = um quadro   shift+← → = 2 s   ↑ ↓ = velocidade
-    e = explorando objeto   g = grooming   s = sniffing fora do objeto
-    r = rearing   o = outro comportamento notável   x = não dá para ver
+    e = explorando objeto   g = grooming   r = rearing
+    o = outro comportamento notável   x = não dá para ver
     volta = desfaz a última ação   delete = apaga o intervalo sob o cursor
     a = aceita a sugestão sob o cursor   n / p = próxima / anterior sugestão
     clique na linha do tempo = pula para lá   q = salvar e sair
@@ -54,10 +54,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from mindtrace_ml.schema import LABEL_COLUMNS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of  # noqa: E402
 
+# Sniffing saiu do projeto: sutil, difícil de separar e de pouco valor para o NOR.
+# As marcações antigas continuam no arquivo; só não há mais tecla para ele.
 KEYS = {
     "e": "object_interaction",
     "g": "grooming",
-    "s": "sniffing",
     "r": "rearing",
     "o": "other",
     "x": "unscorable",
