@@ -21,3 +21,4 @@ data/objects.csv
 # Saída da camada de movimento: derivada da pose, regenerável.
 data/movement/
 data/video_features/
+data/excluded/

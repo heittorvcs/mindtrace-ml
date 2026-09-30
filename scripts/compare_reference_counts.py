@@ -6,6 +6,11 @@ uma comparação de totais: um rearing perdido e um alarme falso se anulam, e
 quem contou pode ter usado outro critério. Serve para dizer se o modelo
 acompanha os animais (quem levanta mais, quem levanta menos), não onde ele erra.
 
+O dia 5 da habituação fica de fora: as caixas "1a" e "2a" têm gabaritos nas
+paredes — outro contexto visual —, e o modelo de pose, treinado nas caixas do
+NOR, achou o rato em 1% e 28% dos quadros. Os arquivos derivados dessas sessões
+estão em data/excluded/.
+
 O relógio começa quando o rato aparece na arena, e não no primeiro quadro: o
 vídeo tem alguns segundos a mais que os 20 min da sessão, gastos em colocar o
 animal. A distância percorrida entra também, para ver se pixels e metros andam
@@ -26,6 +31,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from mindtrace_ml.agreement import agreement  # noqa: E402
 from mindtrace_ml.behavior_model import bouts, frame_mask, gate, session_features  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 from mindtrace_ml.movement import movement_layer  # noqa: E402
@@ -78,6 +84,8 @@ def main() -> int:
     parser.add_argument("--objects", type=Path, default=ROOT / "data" / "objects.csv")
     parser.add_argument("--fps", type=float, default=29.97)
     parser.add_argument("--merge-gap-sec", type=float, default=0.3)
+    parser.add_argument("--detail-threshold", type=float, default=0.6,
+                        help="limiar mostrado sessão a sessão e com as estatísticas de concordância")
     args = parser.parse_args()
 
     import joblib
@@ -136,10 +144,17 @@ def main() -> int:
         print(f"  {minutes} min: {scale.median():.0f} px por metro (varia {scale.min():.0f}–{scale.max():.0f}), "
               f"correlação {r:.2f}")
 
-    view = ["session_id", "rearings_5min", "count_5min_t0.3", "rearings_20min", "count_20min_t0.3",
+    t = args.detail_threshold
+    view = ["session_id", "rearings_5min", f"count_5min_t{t}", "rearings_20min", f"count_20min_t{t}",
             "distance_20min_m", "distance_20min_px"]
-    print("\npor sessão (limiar 0,3):")
+    print(f"\npor sessão (limiar {t}):")
     print(detected[view].round(1).to_string(index=False))
+    if len(detected) > 2:
+        for minutes in WINDOWS_MIN:
+            result = agreement(detected[f"rearings_{minutes}min"], detected[f"count_{minutes}min_t{t}"])
+            low, high = result["limits_pct"]
+            print(f"  {minutes} min: diferença {result['bias_pct']:+.0f}%, cada sessão {low:+.0f}% a {high:+.0f}%, "
+                  f"Lin {result['ccc']:.2f}, menor margem de equivalência ±{result['smallest_margin_pct']:.0f}%")
     return 0
 
 
