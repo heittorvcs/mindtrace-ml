@@ -39,6 +39,8 @@ from mindtrace_ml.triage_model import KEYPOINTS  # noqa: E402
 
 THRESHOLDS = (0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
 WINDOWS_MIN = (5, 20)
+CALIBRATION_THRESHOLDS = tuple(np.round(np.arange(0.5, 0.96, 0.05), 2))
+CALIBRATION_GAPS = (0.3, 0.6, 1.0, 1.5)
 
 
 def arrival(pose: pd.DataFrame, fps: float, min_points: int = 3, hold_sec: float = 1.0) -> int:
@@ -94,7 +96,7 @@ def main() -> int:
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
     gap = int(round(args.merge_gap_sec * args.fps))
 
-    rows = []
+    rows, grids = [], {}
     available = [s for s in reference.session_id
                  if (args.pose / f"{s}.csv").exists() and (args.video_features / f"{s}.csv").exists()]
     print(f"{len(available)} de {len(reference)} sessões da referência com pose e sinais de vídeo\n")
@@ -119,6 +121,7 @@ def main() -> int:
             for minutes in WINDOWS_MIN:
                 end = start + int(round(minutes * 60 * args.fps))
                 row[f"count_{minutes}min_t{threshold}"] = sum(start <= a < end for a, _ in episodes)
+        grids[session] = count_grid(scores, data, start, args)
         rows.append(row)
         print(f"  {session}: rato aparece em {row['start_s']:.1f} s", flush=True)
 
@@ -155,7 +158,53 @@ def main() -> int:
             low, high = result["limits_pct"]
             print(f"  {minutes} min: diferença {result['bias_pct']:+.0f}%, cada sessão {low:+.0f}% a {high:+.0f}%, "
                   f"Lin {result['ccc']:.2f}, menor margem de equivalência ±{result['smallest_margin_pct']:.0f}%")
+
+    if len(detected) > 2:
+        print("\ncalibração — limiar e junção escolhidos com as outras sessões, medidos na que ficou de fora:")
+        for minutes in WINDOWS_MIN:
+            table = calibrate(detected, grids, minutes)
+            print(f"\n  {minutes} min")
+            print(table.to_string(index=False))
+            print(f"  erro médio por sessão {table['erro %'].abs().mean():.0f}%, viés {table['erro %'].mean():+.0f}%")
     return 0
+
+
+def count_grid(scores: np.ndarray, data: dict, start: int, args) -> dict:
+    """Episódios contados em cada combinação de limiar e junção."""
+    grid = {}
+    for threshold in CALIBRATION_THRESHOLDS:
+        mask = gate(args.behavior, frame_mask(scores, data["centers"], len(data["frames"]),
+                                              threshold, args.fps), data["freezing"], args.fps)
+        for gap_sec in CALIBRATION_GAPS:
+            episodes = merged(mask, int(round(gap_sec * args.fps)))
+            for minutes in WINDOWS_MIN:
+                end = start + int(round(minutes * 60 * args.fps))
+                grid[(threshold, gap_sec, minutes)] = sum(start <= a < end for a, _ in episodes)
+    return grid
+
+
+def calibrate(detected: pd.DataFrame, grids: dict, minutes: int) -> pd.DataFrame:
+    """Escolhe limiar e junção com as outras sessões e mede na que ficou de fora.
+
+    Escolher o que melhor bate com todas e medir nelas mesmas daria um erro
+    otimista: o ajuste aprenderia as particularidades destas ratas. Calibrar
+    contra a planilha também alinha o modelo ao critério de quem a contou.
+    """
+    sessions = detected.session_id.tolist()
+    truth = dict(zip(sessions, detected[f"rearings_{minutes}min"].astype(float)))
+    options = [(t, g) for t in CALIBRATION_THRESHOLDS for g in CALIBRATION_GAPS]
+
+    def error(option, names):
+        return np.mean([abs(grids[s][(*option, minutes)] - truth[s]) / truth[s] for s in names])
+
+    rows = []
+    for held in sessions:
+        best = min(options, key=lambda option: error(option, [s for s in sessions if s != held]))
+        count = grids[held][(*best, minutes)]
+        rows.append({"sessão": held, "limiar": best[0], "junta até (s)": best[1],
+                     "planilha": int(truth[held]), "modelo": count,
+                     "erro %": round(100 * (count - truth[held]) / truth[held])})
+    return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
