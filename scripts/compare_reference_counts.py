@@ -35,7 +35,7 @@ from mindtrace_ml.agreement import agreement  # noqa: E402
 from mindtrace_ml.behavior_model import MERGE_GAP_SEC, bouts, frame_mask, gate, session_features  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 from mindtrace_ml.movement import movement_layer  # noqa: E402
-from mindtrace_ml.triage_model import KEYPOINTS  # noqa: E402
+from mindtrace_ml.triage_model import KEYPOINTS, animal_of  # noqa: E402
 
 THRESHOLDS = (0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
 WINDOWS_MIN = (5, 20)
@@ -101,10 +101,12 @@ def main() -> int:
     rows, grids = [], {}
     available = [s for s in reference.session_id
                  if (args.pose / f"{s}.csv").exists() and (args.video_features / f"{s}.csv").exists()]
-    # Sessão rotulada que entrou no treino do modelo não serve para medi-lo.
-    trained = [s for s in available if s in set(bundle.get("sessions", []))]
+    # Animal que entrou no treino do modelo não serve para medi-lo, nem em outro
+    # dia: o modelo aprendeu o jeito dele levantar.
+    seen_animals = {animal_of(s) for s in bundle.get("sessions", [])}
+    trained = [s for s in available if animal_of(s) in seen_animals]
     if trained:
-        print(f"fora da comparação por terem entrado no treino: {', '.join(trained)}")
+        print(f"fora da comparação (animal usado no treino): {', '.join(trained)}")
         available = [s for s in available if s not in trained]
     print(f"{len(available)} de {len(reference)} sessões da referência com pose e sinais de vídeo\n")
     for session in available:
