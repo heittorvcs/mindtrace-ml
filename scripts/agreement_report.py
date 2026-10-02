@@ -31,19 +31,16 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     bouts,
     frame_mask,
     gate,
+    label_mask,
     make_model,
     session_features,
     targets,
 )
-from mindtrace_ml.labels import bouts_for, intervals_to_mask  # noqa: E402
-
-MERGE_GAP_SEC = 0.3
 
 
-def episodes(mask: np.ndarray, gap: int) -> int:
-    """Episódios, fundindo os separados por menos de `gap` quadros."""
-    found = bouts(mask)
-    return sum(1 for i, (start, _) in enumerate(found) if i == 0 or start - found[i - 1][1] > gap)
+def episodes(mask: np.ndarray) -> int:
+    """Episódios. Rótulos e detecção já vêm com as descidas breves fundidas."""
+    return len(bouts(mask))
 
 
 def blind_sessions(progress: pd.DataFrame, behavior: str) -> pd.DataFrame:
@@ -108,11 +105,10 @@ def main() -> int:
         data["seen"] = data["centers"] <= record.watched_until
         data["watched"] = record.watched_until
         own = labels[labels.session_id == record.session_id]
-        data["y"] = targets(own, data["frames"], data["centers"])
-        data["marked"] = intervals_to_mask(bouts_for(own, args.behavior), data["frames"])
+        data["y"] = targets(own, data["frames"], data["centers"], args.fps)
+        data["marked"] = label_mask(own, args.behavior, data["frames"], args.fps)
         sessions[record.session_id] = data
 
-    gap = int(round(MERGE_GAP_SEC * args.fps))
     rows = []
     for name, data in sessions.items():
         if bundle:
@@ -133,8 +129,8 @@ def main() -> int:
         rows.append({"sessão": name,
                      "tempo manual (s)": marked.sum() / args.fps,
                      "tempo automático (s)": detected.sum() / args.fps,
-                     "episódios manual": episodes(marked, gap),
-                     "episódios automático": episodes(detected, gap)})
+                     "episódios manual": episodes(marked),
+                     "episódios automático": episodes(detected)})
         print(".", end="", flush=True)
     table = pd.DataFrame(rows)
 

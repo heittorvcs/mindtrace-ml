@@ -22,8 +22,14 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mindtrace_ml.behavior_model import bouts, compare, frame_mask, gate, session_features  # noqa: E402
-from mindtrace_ml.labels import bouts_for, intervals_to_mask  # noqa: E402
+from mindtrace_ml.behavior_model import (  # noqa: E402
+    bouts,
+    compare,
+    frame_mask,
+    gate,
+    label_mask,
+    session_features,
+)
 
 THRESHOLDS = (0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05)
 
@@ -65,8 +71,8 @@ def main() -> int:
         pixels = pd.read_csv(args.video_features / f"{session}.csv", encoding="utf-8-sig")
         data = session_features(pose, objects[objects.session_id == session], args.fps, pixels)
         seen = data["frames"] <= record.watched_until
-        marked = intervals_to_mask(bouts_for(labels[labels.session_id == session], args.behavior),
-                                   data["frames"])[seen]
+        marked = label_mask(labels[labels.session_id == session], args.behavior,
+                            data["frames"], args.fps)[seen]
         scores = bundle["models"][args.behavior].predict_proba(data["X"][bundle["features"]])[:, 1]
         for threshold in THRESHOLDS:
             mask = gate(args.behavior, frame_mask(scores, data["centers"], len(data["frames"]),

@@ -31,11 +31,11 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     compare,
     frame_mask,
     gate,
+    label_mask,
     make_model,
     session_features,
     targets,
 )
-from mindtrace_ml.labels import bouts_for, intervals_to_mask  # noqa: E402
 from mindtrace_ml.schema import SESSION_BEHAVIORS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of, label_sets  # noqa: E402
 
@@ -198,9 +198,9 @@ def main() -> int:
         data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
         watched = int(progress[progress.session_id == session].watched_until.max())
         data["seen"] = data["centers"] <= watched
-        data["y"] = targets(labels[labels.session_id == session], data["frames"], data["centers"])
-        data["marked"] = {b: intervals_to_mask(bouts_for(labels[labels.session_id == session], b),
-                                               data["frames"]) for b in BEHAVIORS}
+        own = labels[labels.session_id == session]
+        data["y"] = targets(own, data["frames"], data["centers"], args.fps)
+        data["marked"] = {b: label_mask(own, b, data["frames"], args.fps) for b in BEHAVIORS}
         data["watched"] = watched
         sessions[session] = data
         print(".", end="", flush=True)

@@ -52,8 +52,13 @@ def overlapping_within_behavior(labels: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(offenders)
 
 
-def bouts_for(labels: pd.DataFrame, behavior: str, field: int | None = None) -> list[tuple[int, int]]:
-    """Intervalos (início, fim) inclusivos de um comportamento, fundidos."""
+def bouts_for(labels: pd.DataFrame, behavior: str, field: int | None = None,
+              gap: int = 0) -> list[tuple[int, int]]:
+    """Intervalos (início, fim) inclusivos de um comportamento, fundidos.
+
+    `gap` funde também os separados por até esse número de quadros — a descida
+    breve que, pela definição do laboratório, não encerra o rearing.
+    """
     selected = labels[labels["behavior"] == behavior]
     if field is not None:
         selected = selected[selected["field"] == field]
@@ -64,7 +69,7 @@ def bouts_for(labels: pd.DataFrame, behavior: str, field: int | None = None) -> 
     merged = [intervals[0]]
     for start, end in intervals[1:]:
         last_start, last_end = merged[-1]
-        if start <= last_end + 1:
+        if start <= last_end + max(1, gap):
             merged[-1] = (last_start, max(last_end, end))
         else:
             merged.append((start, end))

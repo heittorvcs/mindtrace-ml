@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mindtrace_ml.agreement import agreement  # noqa: E402
-from mindtrace_ml.behavior_model import bouts, frame_mask, gate, session_features  # noqa: E402
+from mindtrace_ml.behavior_model import MERGE_GAP_SEC, bouts, frame_mask, gate, session_features  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 from mindtrace_ml.movement import movement_layer  # noqa: E402
 from mindtrace_ml.triage_model import KEYPOINTS  # noqa: E402
@@ -40,7 +40,9 @@ from mindtrace_ml.triage_model import KEYPOINTS  # noqa: E402
 THRESHOLDS = (0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
 WINDOWS_MIN = (5, 20)
 CALIBRATION_THRESHOLDS = tuple(np.round(np.arange(0.5, 0.96, 0.05), 2))
-CALIBRATION_GAPS = (0.3, 0.6, 1.0, 1.5)
+# A junção de episódios é a definição do laboratório (MERGE_GAP_SEC), não um
+# parâmetro a calibrar: só o limiar é escolhido.
+CALIBRATION_GAPS = (MERGE_GAP_SEC["rearing"],)
 
 
 def arrival(pose: pd.DataFrame, fps: float, min_points: int = 3, hold_sec: float = 1.0) -> int:
@@ -85,7 +87,7 @@ def main() -> int:
     parser.add_argument("--video-features", type=Path, default=ROOT / "data" / "video_features")
     parser.add_argument("--objects", type=Path, default=ROOT / "data" / "objects.csv")
     parser.add_argument("--fps", type=float, default=29.97)
-    parser.add_argument("--merge-gap-sec", type=float, default=0.3)
+    parser.add_argument("--merge-gap-sec", type=float, default=MERGE_GAP_SEC["rearing"])
     parser.add_argument("--detail-threshold", type=float, default=0.6,
                         help="limiar mostrado sessão a sessão e com as estatísticas de concordância")
     args = parser.parse_args()
@@ -99,6 +101,11 @@ def main() -> int:
     rows, grids = [], {}
     available = [s for s in reference.session_id
                  if (args.pose / f"{s}.csv").exists() and (args.video_features / f"{s}.csv").exists()]
+    # Sessão rotulada que entrou no treino do modelo não serve para medi-lo.
+    trained = [s for s in available if s in set(bundle.get("sessions", []))]
+    if trained:
+        print(f"fora da comparação por terem entrado no treino: {', '.join(trained)}")
+        available = [s for s in available if s not in trained]
     print(f"{len(available)} de {len(reference)} sessões da referência com pose e sinais de vídeo\n")
     for session in available:
         pose = pd.read_csv(args.pose / f"{session}.csv", encoding="utf-8-sig")

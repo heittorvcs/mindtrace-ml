@@ -48,6 +48,13 @@ SCALES = (15, 60, 120)   # quadros: ~0,5 s, 2 s e 4 s a 30 fps
 STEP = 8                 # uma janela a cada ~0,27 s
 MIN_BOUT_SEC = 0.3
 
+# Quanto tempo o rato pode tocar o chão sem que o rearing termine. É o critério
+# de quem conta os rearings no laboratório: nas ratas F6 e F2 da habituação, o
+# anotador marcou cada descida (20 e 54 rearings em 5 min) e a planilha tinha 15
+# e 37; juntando as descidas de menos de 0,5 s, os rótulos dão 16 e 36. Descartar
+# os rearings curtos não explicava as duas ratas com um mesmo corte.
+MERGE_GAP_SEC = {"rearing": 0.5}
+
 
 # Sinais em que importa a direção da mudança dentro da janela, não só o nível.
 # Um rearing tem forma — sobe, fica, desce —, e o resumo por mediana e quantis
@@ -116,13 +123,33 @@ def window_centers(n_frames: int, step: int = STEP) -> np.ndarray:
     return np.arange(0, n_frames, step)
 
 
-def targets(labels: pd.DataFrame, frames: np.ndarray, centers: np.ndarray) -> pd.DataFrame:
+def merge_gap(behavior: str, fps: float) -> int:
+    """Descida máxima, em quadros, que não encerra um episódio do comportamento."""
+    return int(round(MERGE_GAP_SEC.get(behavior, 0.0) * fps))
+
+
+def label_mask(labels: pd.DataFrame, behavior: str, frames: np.ndarray, fps: float) -> np.ndarray:
+    """Quadros marcados, com a mesma definição de episódio usada na detecção."""
+    return intervals_to_mask(bouts_for(labels, behavior, gap=merge_gap(behavior, fps)), frames)
+
+
+def close_gaps(mask: np.ndarray, gap: int) -> np.ndarray:
+    """Preenche as interrupções de até `gap` quadros entre dois trechos marcados."""
+    if gap <= 0 or not mask.any():
+        return mask
+    out = mask.copy()
+    found = bouts(mask)
+    for (_, previous_end), (start, _) in zip(found, found[1:]):
+        if start - previous_end <= gap:
+            out[previous_end:start] = True
+    return out
+
+
+def targets(labels: pd.DataFrame, frames: np.ndarray, centers: np.ndarray,
+            fps: float = 29.97) -> pd.DataFrame:
     """Para cada centro, se cada comportamento estava marcado naquele quadro."""
-    out = {}
-    for behavior in BEHAVIORS:
-        mask = intervals_to_mask(bouts_for(labels, behavior), frames)
-        out[behavior] = mask[centers]
-    return pd.DataFrame(out)
+    return pd.DataFrame({behavior: label_mask(labels, behavior, frames, fps)[centers]
+                         for behavior in BEHAVIORS})
 
 
 def frame_mask(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,
@@ -134,17 +161,22 @@ def frame_mask(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,
 
 
 def gate(behavior: str, mask: np.ndarray, freezing: np.ndarray, fps: float) -> np.ndarray:
-    """A camada de movimento veta o que é incompatível com ela.
+    """Regras finais de cada comportamento sobre os episódios detectados.
 
-    Grooming é movimento — cabeça e patas trabalhando —, e freezing é a ausência
-    dele. Sem esse veto, o detector confundia rato imóvel com grooming: nos
-    clipes de outros animais, 69 de 106 alarmes falsos eram "parado" ou
-    "freezing", 44 deles dos dois animais mais imóveis. Custo medido nas
-    sessões: 7% do grooming marcado cai no que a camada chama de freezing.
+    Rearing: descidas de menos de MERGE_GAP_SEC não encerram o episódio — a
+    mesma definição aplicada aos rótulos, para contagem e tempo serem comparáveis.
+
+    Grooming: a camada de movimento veta o que é incompatível com ela. Grooming é
+    movimento — cabeça e patas trabalhando —, e freezing é a ausência dele. Sem
+    esse veto, o detector confundia rato imóvel com grooming: nos clipes de
+    outros animais, 69 de 106 alarmes falsos eram "parado" ou "freezing", 44 deles
+    dos dois animais mais imóveis. Custo medido nas sessões: 7% do grooming
+    marcado cai no que a camada chama de freezing.
     """
-    if behavior != "grooming":
-        return mask
-    return _sustained(mask & ~freezing, int(round(MIN_BOUT_SEC * fps)))
+    mask = close_gaps(mask, merge_gap(behavior, fps))
+    if behavior == "grooming":
+        mask = mask & ~freezing
+    return _sustained(mask, int(round(MIN_BOUT_SEC * fps)))
 
 
 def bouts(mask: np.ndarray) -> list[tuple[int, int]]:
