@@ -9,6 +9,10 @@ Retomável: pula os vídeos que já têm CSV completo.
 Uso em CPU:
     python scripts/extract_pose.py --videos .../arenas --model .../Network-MemoryLab-v2.onnx --output data/pose
 
+A 15 fps, sem perda medida no rearing (ver extract_video). Metade das inferências;
+o vídeo continua decodificado inteiro, e numa sessão de 5 min foram 109 s contra 191 s:
+    python scripts/extract_pose.py --videos .../arenas --model models/cspnext_s.onnx --output data/pose --every 2
+
 Em GPU AMD via DirectML (requer: pip install onnxruntime-directml):
     python scripts/extract_pose.py ... --provider DmlExecutionProvider
 """
@@ -52,7 +56,10 @@ def main() -> int:
     parser.add_argument("--layout", default="full", choices=["full", "mosaic2x2"],
                         help="'full' para as arenas já separadas")
     parser.add_argument("--fields", default="0", help="lista separada por vírgula")
-    parser.add_argument("--every", type=int, default=1, help="processa 1 a cada N quadros")
+    parser.add_argument("--every", type=int, default=1,
+                        help="infere 1 a cada N quadros e interpola os do meio")
+    parser.add_argument("--sparse", action="store_true",
+                        help="com --every, grava só os quadros inferidos: verificação rápida, fora do pipeline")
     parser.add_argument("--equalize", action="store_true",
                         help="só para vídeos de baixo contraste de outro domínio")
     parser.add_argument("--pattern", default="*.mp4")
@@ -91,6 +98,7 @@ def main() -> int:
         rows, meta = extract_video(
             video, model, fields=fields, layout=args.layout,
             every=args.every, use_equalize=args.equalize, keypoints=names,
+            interpolate=not args.sparse,
         )
         frame = pd.DataFrame(rows)
         frame.to_csv(destination, index=False, encoding="utf-8-sig")
