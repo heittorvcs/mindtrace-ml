@@ -432,7 +432,10 @@ class App:
     def quit(self) -> None:
         self.play(False)
         closed = self.annotation.close_all(self.video.position)
-        self.save()
+        # Abrir e fechar sem assistir nada não é rotular: uma linha de progresso aqui
+        # faria a sessão contar como vista, com zero comportamento, nas avaliações.
+        if self.seen.sum() > 1 or self.annotation.intervals or self.annotation.history:
+            self.save()
         if closed:
             print(f"fechados no quadro {self.video.position}: {', '.join(closed)}")
         self.root.destroy()
