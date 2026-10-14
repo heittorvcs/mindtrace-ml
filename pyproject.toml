@@ -6,11 +6,22 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.0",
+    # Os modelos em models/*.joblib foram salvos com 1.9.0: outra versão carrega
+    # com InconsistentVersionWarning e não há garantia de mesmo resultado.
     "scikit-learn>=1.4",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Interfaces de rotulagem, extração de pose e de sinais de vídeo. O OpenCV é o
+# headless: as janelas são Tk (label_session) e matplotlib (mark_objects).
+scripts = [
+    "opencv-python-headless>=4.8",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+    "onnxruntime>=1.17",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
