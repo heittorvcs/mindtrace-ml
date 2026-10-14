@@ -15,9 +15,11 @@ Salva a cada marcação. Reabrir a mesma sessão continua de onde parou; o quant
 já foi assistido fica em `session_progress.csv`, porque ausência de marcação só
 significa ausência de comportamento no trecho que foi de fato visto.
 
-**Só um comportamento** (`--only rearing`): as outras teclas somem e a sessão
-fica registrada como rotulada só para ele — para os outros comportamentos, ela
-continua sem rótulo, e não como "não aconteceu".
+**Só alguns comportamentos** (`--only rearing grooming`): as outras teclas somem
+e a sessão fica registrada como rotulada só para eles. Para os outros
+comportamentos ela continua sem rótulo, e não como "não aconteceu". A
+exploração já não precisa ser marcada: a regra da camada de movimento bate com
+a marcação manual a ±5% em 12 sessões.
 
 **Com sugestões** (`--suggest modelo.joblib`): os episódios que o modelo achou
 aparecem numa linha própria. `a` aceita a sugestão sob o cursor, `n`/`p` pulam
@@ -198,13 +200,14 @@ class App:
     def __init__(self, root, video: Video, annotation: Annotation, session_id: str,
                  annotator: str, output: Path, progress: Path, watched: int,
                  keys: dict = KEYS, suggestions=(), assisted: bool = False,
-                 seen: np.ndarray | None = None, mode: str = "blind"):
+                 seen: np.ndarray | None = None, mode: str = "blind", accept_behavior: str = "rearing"):
         import tkinter as tk
 
         self.keys = keys
         self.suggestions = sorted(suggestions)
         self.assisted = assisted
         self.mode = mode
+        self.accept_behavior = accept_behavior   # o que `a` marca ao aceitar uma sugestão
         # Quadros que passaram na tela. Ausência de marcação só vale onde alguém olhou.
         self.seen = seen if seen is not None else np.zeros(video.count, dtype=bool)
         self.root, self.video, self.annotation = root, video, annotation
@@ -308,7 +311,7 @@ class App:
         elif key.lower() == "a" and self.suggestions:
             hit = next(((a, b) for a, b in self.suggestions if a <= frame <= b), None)
             if hit:
-                behavior = next(v for v in self.keys.values() if v != "unscorable")
+                behavior = self.accept_behavior
                 self.annotation.add(behavior, *hit)
                 self.message = f"sugestão aceita: {hit[0]}–{hit[1]}"
                 self.save()
@@ -485,8 +488,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "session_labels.csv")
     parser.add_argument("--progress", type=Path, default=ROOT / "data" / "session_progress.csv")
     parser.add_argument("--annotator", default="heittor")
-    parser.add_argument("--only", choices=[b for b in KEYS.values() if b != "unscorable"], default=None,
-                        help="rotula só este comportamento (e 'não dá para ver')")
+    parser.add_argument("--only", nargs="+", choices=[b for b in KEYS.values() if b != "unscorable"],
+                        default=None, help="rotula só estes comportamentos (e 'não dá para ver')")
     parser.add_argument("--suggest", type=Path, default=None,
                         help="modelo salvo por train_behavior_model: mostra os episódios que ele acha")
     parser.add_argument("--triage", type=Path, default=None,
@@ -499,14 +502,16 @@ def main() -> int:
     args = parser.parse_args()
     if args.suggest and args.triage:
         parser.error("use --suggest ou --triage, não os dois")
-    if args.triage and args.only is None:
+    if args.triage:
         # Só se revisa o comportamento do modelo. Marcar os outros sem assistir a
         # tudo deixaria rótulos incompletos que a análise trataria como completos.
-        args.only = "rearing"
+        if args.only not in (None, ["rearing"]):
+            parser.error("--triage rotula só rearing")
+        args.only = ["rearing"]
 
     keys = KEYS
     if args.only:
-        keys = {k: v for k, v in KEYS.items() if v in (args.only, "unscorable")}
+        keys = {k: v for k, v in KEYS.items() if v in (*args.only, "unscorable")}
 
     path = args.videos / f"{args.session}.mp4"
     if not path.exists():
@@ -531,7 +536,7 @@ def main() -> int:
         print(f"continuando: {len(intervals)} intervalos, {seen.mean():.0%} da sessão visto")
 
     suggestions = []
-    behavior = args.only or "rearing"
+    behavior = "rearing" if not args.only or "rearing" in args.only else args.only[0]
     if args.suggest:
         suggestions = model_suggestions(args, behavior)
         print(f"{len(suggestions)} sugestões de {behavior} do modelo")
@@ -548,7 +553,7 @@ def main() -> int:
     root = tk.Tk()
     app = App(root, video, Annotation(intervals), args.session, args.annotator,
               args.output, args.progress, watched, keys=keys, suggestions=suggestions,
-              assisted=bool(args.suggest or args.triage), seen=seen, mode=mode)
+              assisted=bool(args.suggest or args.triage), seen=seen, mode=mode, accept_behavior=behavior)
     if args.triage and not started:
         app.save()
     if watched:
