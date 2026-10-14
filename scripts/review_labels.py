@@ -12,7 +12,7 @@ da comparação. Um episódio está "nas duas" se cruza algum episódio da outra
 Uso:
     python scripts/review_labels.py --session TT_9_cam2 --videos ../videos_lab/arenas
     python scripts/review_labels.py --session TT_15_cam1 --videos ../videos_lab/arenas \\
-        --a data/session_labels.csv --b data/relabel/session_labels_r2.csv --names antiga,nova
+        --a data/relabel/session_labels_r1_original.csv --names antiga,nova
 
 Teclas:
     espaço = tocar/pausar   ← → = um quadro   shift+← → = 2 s   ↑ ↓ = velocidade
@@ -40,7 +40,6 @@ from mindtrace_ml.behavior_model import bouts, label_mask  # noqa: E402
 STATUS_COLORS = {"both": "#2a78d6", "only_a": "#eb6834", "only_b": "#1baf7a"}
 UNSCORABLE_COLOR = "#7f8c8d"
 IDLE_COLOR = "#e1e0d9"
-MARGIN = 54   # espaço do nome de cada linha, à esquerda das linhas do tempo
 
 
 def compare_episodes(a: pd.DataFrame, b: pd.DataFrame, behavior: str, n_frames: int, fps: float):
@@ -85,6 +84,7 @@ def frame_status(masks, frame: int) -> str | None:
 class App:
     def __init__(self, root, video: Video, episodes, masks, session_id: str, behavior: str, names):
         import tkinter as tk
+        import tkinter.font as tkfont
 
         self.root, self.video = root, video
         self.episodes, self.masks = episodes, masks
@@ -93,6 +93,8 @@ class App:
         self.playing = False
         self.after_id = None
         self.speed = 1.0
+        # Espaço do nome de cada linha, à esquerda das linhas do tempo.
+        self.margin = 16 + max(tkfont.Font(family="Consolas", size=9).measure(name) for name in names)
 
         width, height = (side * SCALE for side in video.size)
         self.width = width
@@ -129,7 +131,7 @@ class App:
         self.render()
 
     def seek_click(self, event, first: int, last: int) -> None:
-        share = (event.x - MARGIN) / max(1, self.width - MARGIN)
+        share = (event.x - self.margin) / max(1, self.width - self.margin)
         self.seek(first + int(np.clip(share, 0, 1) * (last - first)))
 
     def zoom_range(self) -> tuple[int, int]:
@@ -226,12 +228,12 @@ class App:
         span = max(1, last - first)
 
         def x(frame):
-            return MARGIN + (frame - first) / span * (self.width - MARGIN)
+            return self.margin + (frame - first) / span * (self.width - self.margin)
 
         for row, (lane, name) in enumerate((("a", self.names[0]), ("b", self.names[1]))):
             top = 8 + 16 * row
             canvas.create_text(4, top + 6, text=name, anchor="w", font=("Consolas", 9), fill="#777777")
-            canvas.create_rectangle(MARGIN, top, self.width, top + 12, fill="#ececea", width=0)
+            canvas.create_rectangle(self.margin, top, self.width, top + 12, fill="#ececea", width=0)
             for episode in self.episodes:
                 if episode["lane"] == lane and episode["end"] >= first and episode["start"] <= last:
                     left = x(max(episode["start"], first))
@@ -261,7 +263,8 @@ def main() -> int:
                         help="primeira marcação (padrão: os rótulos oficiais)")
     parser.add_argument("--b", type=Path, default=ROOT / "data" / "relabel" / "session_labels_r2.csv",
                         help="segunda marcação (padrão: a re-rotulagem às cegas)")
-    parser.add_argument("--names", default="antiga,nova", help="nomes das duas marcações, separados por vírgula")
+    parser.add_argument("--names", default="oficial,re-rotulagem",
+                        help="nomes das duas marcações, separados por vírgula")
     parser.add_argument("--behavior", default="rearing")
     args = parser.parse_args()
 
