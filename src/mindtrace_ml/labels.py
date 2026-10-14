@@ -86,6 +86,40 @@ def intervals_to_mask(intervals, frames: np.ndarray) -> np.ndarray:
     return mask
 
 
+def mask_to_ranges(mask: np.ndarray) -> str:
+    """Quadros marcados como texto compacto, "início-fim;início-fim" (inclusivos)."""
+    edges = np.diff(np.concatenate([[0], mask.astype(int), [0]]))
+    starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1) - 1
+    return ";".join(f"{a}-{b}" for a, b in zip(starts, ends))
+
+
+def ranges_to_mask(text, n_frames: int) -> np.ndarray:
+    mask = np.zeros(n_frames, dtype=bool)
+    if isinstance(text, str) and text:
+        for part in text.split(";"):
+            start, end = (int(v) for v in part.split("-"))
+            mask[start:end + 1] = True
+    return mask
+
+
+def seen_frames(progress: pd.DataFrame, n_frames: int) -> np.ndarray:
+    """Quadros que alguém de fato viu, nas linhas de progresso de uma sessão.
+
+    Ausência de marcação só quer dizer "não aconteceu" onde a sessão foi vista. Na
+    rotulagem contínua, isso é tudo até `watched_until`. Na de três classes, o
+    anotador pula de um candidato a outro, e o que viu fica na coluna `seen`, os
+    trechos exibidos na tela. Linhas sem essa coluna são da rotulagem contínua.
+    """
+    mask = np.zeros(n_frames, dtype=bool)
+    for record in progress.itertuples():
+        ranges = getattr(record, "seen", None)
+        if isinstance(ranges, str) and ranges:
+            mask |= ranges_to_mask(ranges, n_frames)
+        else:
+            mask[:int(record.watched_until) + 1] = True
+    return mask
+
+
 def label_matrix(labels: pd.DataFrame, frames: np.ndarray, field: int | None = None):
     """Matriz booleana (quadros × comportamentos) mais a máscara de pontuáveis.
 

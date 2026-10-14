@@ -152,12 +152,51 @@ def targets(labels: pd.DataFrame, frames: np.ndarray, centers: np.ndarray,
                          for behavior in BEHAVIORS})
 
 
+def frame_scores(window_scores: np.ndarray, centers: np.ndarray, n_frames: int) -> np.ndarray:
+    """Nota de cada quadro: a da janela de centro mais próximo."""
+    nearest = np.clip(np.rint(np.arange(n_frames) / (centers[1] - centers[0])).astype(int),
+                      0, len(centers) - 1) if len(centers) > 1 else np.zeros(n_frames, int)
+    return window_scores[nearest]
+
+
 def frame_mask(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,
                threshold: float, fps: float) -> np.ndarray:
     """Nota por janela → episódios por quadro, sem trechos curtos demais."""
-    nearest = np.clip(np.rint(np.arange(n_frames) / (centers[1] - centers[0])).astype(int),
-                      0, len(centers) - 1) if len(centers) > 1 else np.zeros(n_frames, int)
-    return _sustained(window_scores[nearest] >= threshold, int(round(MIN_BOUT_SEC * fps)))
+    return _sustained(frame_scores(window_scores, centers, n_frames) >= threshold,
+                      int(round(MIN_BOUT_SEC * fps)))
+
+
+def triage_episodes(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,
+                    freezing: np.ndarray, fps: float, low: float, high: float,
+                    cut: float | None = None, behavior: str = "rearing") -> list[tuple[int, int, float, bool]]:
+    """Episódios em três classes: aceitos, a revisar e, por omissão, descartados.
+
+    Devolve (início, fim, nota máxima, aceito) em índices de linha. Aceito é o
+    episódio cuja nota máxima chega a `high`; a revisar, o que fica entre `low` e
+    `high`; abaixo de `low`, nada é apresentado.
+
+    Os limites saem de `cut`, o limiar de operação do modelo, e `low` só pesca os
+    candidatos fracos, que não chegam a `cut` em nenhum ponto. Recortar tudo pelo
+    limiar baixo junta dois rearings vizinhos num episódio só, porque entre eles
+    a nota raramente cai abaixo de 0,1. Sem `cut`, o recorte é pelo limiar baixo.
+    """
+    scores = frame_scores(window_scores, centers, n_frames)
+
+    def found(threshold):
+        return bouts(gate(behavior, frame_mask(window_scores, centers, n_frames, threshold, fps), freezing, fps))
+
+    def classify(segments):
+        return [(int(a), int(b), float(scores[a:b + 1].max()), bool(scores[a:b + 1].max() >= high))
+                for a, b in segments]
+
+    if cut is None:
+        return classify(found(low))
+    main = found(cut)
+    covered = np.zeros(n_frames, dtype=bool)
+    for a, b in main:
+        covered[a:b + 1] = True
+    weak = [(a, b) for a, b in found(low) if not covered[a:b + 1].any()]
+    return sorted(classify(main) + [(a, b, peak, False) for a, b, peak, _ in classify(weak)])
 
 
 def gate(behavior: str, mask: np.ndarray, freezing: np.ndarray, fps: float) -> np.ndarray:

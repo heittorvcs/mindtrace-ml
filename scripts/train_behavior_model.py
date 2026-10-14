@@ -36,6 +36,7 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     session_features,
     targets,
 )
+from mindtrace_ml.labels import seen_frames  # noqa: E402
 from mindtrace_ml.schema import SESSION_BEHAVIORS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of, label_sets  # noqa: E402
 
@@ -100,7 +101,7 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
     """
     scores = {}
     for inner in names:
-        rest = [s for s in names if s != inner]
+        rest = [s for s in names if animal_of(s) != animal_of(inner)]
         model = make_model().fit(*stack(sessions, rest, behavior))
         scores[inner] = model.predict_proba(sessions[inner]["X"])[:, 1]
 
@@ -123,7 +124,7 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
             hits = total = 0
             for inner in names:
                 data = sessions[inner]
-                seen = data["frames"] <= data["watched"]
+                seen = data["visible"]
                 mask = gate(behavior, frame_mask(scores[inner], data["centers"], len(data["frames"]),
                                                  candidate, fps), data["freezing"], fps)
                 for first, last in bouts(data["marked"][behavior] & seen):
@@ -196,12 +197,11 @@ def main() -> int:
     sessions = {}
     for session in labeled:
         data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
-        watched = int(progress[progress.session_id == session].watched_until.max())
-        data["seen"] = data["centers"] <= watched
+        data["visible"] = seen_frames(progress[progress.session_id == session], len(data["frames"]))
+        data["seen"] = data["visible"][data["centers"]]
         own = labels[labels.session_id == session]
         data["y"] = targets(own, data["frames"], data["centers"], args.fps)
         data["marked"] = {b: label_mask(own, b, data["frames"], args.fps) for b in BEHAVIORS}
-        data["watched"] = watched
         sessions[session] = data
         print(".", end="", flush=True)
     print()
@@ -214,9 +214,11 @@ def main() -> int:
     for behavior in behaviors:
         pool = eligible[behavior]
         for held in [s for s in pool if not assisted[s]]:
-            train = [s for s in pool if s != held]
+            # Fora o animal, não só a sessão: as do modo de três classes são, de
+            # propósito, segundas sessões de animais já rotulados às cegas.
+            train = [s for s in pool if animal_of(s) != animal_of(held)]
             data = sessions[held]
-            seen_frames = data["frames"] <= data["watched"]
+            visible = data["visible"]
             model, threshold = fit_with_threshold(sessions, train, behavior, args.fps, args.target_recall)
             scores = model.predict_proba(data["X"])[:, 1]
             predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
@@ -224,11 +226,11 @@ def main() -> int:
             marked = data["marked"][behavior]
             results.append({"sessão": held, "comportamento": behavior, "método": "modelo",
                             "limiar": threshold,
-                            **compare(marked[seen_frames], predicted[seen_frames], args.fps)})
+                            **compare(marked[visible], predicted[visible], args.fps)})
             if behavior == "grooming":
                 rule = data["triaged"]["active_head"].to_numpy(bool)
                 results.append({"sessão": held, "comportamento": behavior, "método": "cabeça ativa",
-                                **compare(marked[seen_frames], rule[seen_frames], args.fps)})
+                                **compare(marked[visible], rule[visible], args.fps)})
     results = pd.DataFrame(results)
 
     print("\n1. sessão deixada de fora — cada linha foi detectada por um modelo que não a viu\n")

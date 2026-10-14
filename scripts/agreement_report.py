@@ -36,6 +36,7 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     session_features,
     targets,
 )
+from mindtrace_ml.triage_model import animal_of  # noqa: E402
 
 
 def episodes(mask: np.ndarray) -> int:
@@ -115,7 +116,7 @@ def main() -> int:
             model = bundle["models"][args.behavior]
             X = data["X"][bundle["features"]]
         else:
-            others = [s for s in sessions if s != name]
+            others = [s for s in sessions if animal_of(s) != animal_of(name)]
             model = make_model().fit(
                 pd.concat([sessions[s]["X"][sessions[s]["seen"]] for s in others]),
                 np.concatenate([sessions[s]["y"][args.behavior].to_numpy()[sessions[s]["seen"]]

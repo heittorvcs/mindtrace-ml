@@ -26,17 +26,33 @@ inteiro mesmo assim — é o que acha os rearings que o modelo perdeu. A sessão
 fica marcada como assistida e não entra na medida de quanto o modelo acha: ver
 a sugestão antes induz a concordar com ela.
 
+**Três classes** (`--triage modelo.joblib`, só rearing): o modelo divide os
+episódios pela nota máxima. Acima de `--high` (0,7) o episódio já entra marcado.
+Pelos clipes rotulados, quase todos são reais (96%), e `delete` apaga um errado.
+Entre `--low` (0,1) e `--high` ficam os duvidosos, na linha "a revisar":
+`n`/`p` levam a cada um, 1 s antes e já tocando, e `a` aceita. Abaixo de
+`--low`, nada aparece.
+
+A ferramenta registra os trechos que de fato passaram na tela (coluna `seen` do
+progresso), e o treino só usa esses. Rever só os duvidosos é rápido e ensina
+onde o modelo hesita. Mas os rearings que ele não vê (~6% têm nota abaixo de
+0,1) só aparecem para quem assiste a tudo. Tocar a sessão inteira, mesmo a 2x,
+cobre esses também. Como as sugestões influenciam, a sessão fica marcada como
+assistida e não mede o modelo.
+
 Uso:
     python scripts/label_session.py --session TT_22_cam1 --videos .../arenas
     python scripts/label_session.py --session TT_10_cam3 --videos .../arenas \
         --only rearing --suggest models/rearing_model.joblib
+    python scripts/label_session.py --session TT_12_cam2 --videos .../arenas \
+        --triage models/rearing_model_v3.joblib
 
 Teclas:
     espaço = tocar/pausar   ← → = um quadro   shift+← → = 2 s   ↑ ↓ = velocidade
     e = explorando objeto   g = grooming   r = rearing
     o = outro comportamento notável   x = não dá para ver
     volta = desfaz a última ação   delete = apaga o intervalo sob o cursor
-    a = aceita a sugestão sob o cursor   n / p = próxima / anterior sugestão
+    a = aceita a sugestão sob o cursor   n / p = próxima / anterior sugestão (ou duvidoso)
     clique na linha do tempo = pula para lá   q = salvar e sair
 """
 
@@ -51,6 +67,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from mindtrace_ml.labels import mask_to_ranges, seen_frames  # noqa: E402
 from mindtrace_ml.schema import LABEL_COLUMNS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of  # noqa: E402
 
@@ -180,12 +197,16 @@ class Video:
 class App:
     def __init__(self, root, video: Video, annotation: Annotation, session_id: str,
                  annotator: str, output: Path, progress: Path, watched: int,
-                 keys: dict = KEYS, suggestions=(), assisted: bool = False):
+                 keys: dict = KEYS, suggestions=(), assisted: bool = False,
+                 seen: np.ndarray | None = None, mode: str = "blind"):
         import tkinter as tk
 
         self.keys = keys
         self.suggestions = sorted(suggestions)
         self.assisted = assisted
+        self.mode = mode
+        # Quadros que passaram na tela. Ausência de marcação só vale onde alguém olhou.
+        self.seen = seen if seen is not None else np.zeros(video.count, dtype=bool)
         self.root, self.video, self.annotation = root, video, annotation
         self.session_id, self.annotator = session_id, annotator
         self.output, self.progress = output, progress
@@ -207,7 +228,9 @@ class App:
         self.zoom = tk.Canvas(root, width=width, height=14 * rows + 16, bg="#ffffff", highlightthickness=0)
         self.zoom.pack(pady=(4, 0))
         legend = "  ".join(f"{key}={SHORT[name]}" for key, name in self.keys.items())
-        if self.suggestions:
+        if self.mode == "triage":
+            legend += "   |   a=aceitar duvidoso  n/p=proximo/anterior duvidoso"
+        elif self.suggestions:
             legend += "   |   a=aceitar sugestao  n/p=proxima/anterior"
         tk.Label(root, font=("Consolas", 10), justify="left", anchor="w", text=(
             f"{legend}   (aperte para abrir, de novo para fechar)\n"
@@ -253,9 +276,13 @@ class App:
         if not self.playing:
             return
         step = max(1, int(round(self.speed)))
+        previous = self.video.position
         if not self.video.advance(step):
             self.playing = False
             self.message = "fim do vídeo"
+        # Tocando, os quadros pulados em velocidade alta também foram vistos; um
+        # salto com n/p ou clique, não.
+        self.seen[previous:self.video.position + 1] = True
         self.render()
         if self.playing:
             delay = int(1000 / (self.video.fps * min(self.speed, 1.0)))
@@ -299,6 +326,8 @@ class App:
                 self.message = "não há mais sugestões nessa direção"
             else:
                 self.seek(max(0, target - lead))
+                if self.mode == "triage":
+                    self.play(True)
                 return
         elif key.lower() in self.keys:
             behavior = self.keys[key.lower()]
@@ -326,6 +355,7 @@ class App:
 
         position = self.video.position
         self.watched = max(self.watched, position)
+        self.seen[position] = True
         rgb = cv2.cvtColor(self.video.image, cv2.COLOR_BGR2RGB)
         rgb = cv2.resize(rgb, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_LINEAR)
         self.photo = ImageTk.PhotoImage(Image.fromarray(rgb))
@@ -334,11 +364,15 @@ class App:
         seconds = position / self.video.fps
         total = self.video.count / self.video.fps
         opened = ", ".join(SHORT[b] for b in self.annotation.open) or "—"
+        queue = ""
+        if self.mode == "triage":
+            done = sum(start <= position for start, _ in self.suggestions)
+            queue = f"   duvidoso {done} de {len(self.suggestions)}"
         self.status.config(text=(
             f"{self.session_id}   {int(seconds // 60):02d}:{seconds % 60:04.1f} / "
             f"{int(total // 60):02d}:{total % 60:04.1f}   quadro {position}   "
             f"{self.speed:g}x {'>' if self.playing else '||'}   "
-            f"assistido {self.watched / max(1, self.video.count - 1):.0%}\n"
+            f"visto {self.seen.mean():.0%}{queue}\n"
             f"abertos: {opened}   {self.message}"))
 
         self.draw_timeline(self.full, 0, self.video.count)
@@ -352,12 +386,15 @@ class App:
         def x(frame):
             return (frame - first) / span * width
 
-        # Faixa do que já foi assistido: fora dela, "sem marcação" não quer dizer nada.
-        canvas.create_rectangle(0, 0, x(min(self.watched, last)), 4, fill="#95a5a6", width=0)
+        # Faixa do que já foi visto: fora dela, "sem marcação" não quer dizer nada.
+        edges = np.diff(np.concatenate([[0], self.seen[first:last].astype(int), [0]]))
+        for start, end in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            canvas.create_rectangle(x(first + start), 0, x(first + end), 4, fill="#95a5a6", width=0)
         offset = 0
         if self.suggestions:
             offset = 1
-            canvas.create_text(4, 14, text="sugestoes", anchor="w", font=("Consolas", 8), fill="#999999")
+            lane = "a revisar" if self.mode == "triage" else "sugestoes"
+            canvas.create_text(4, 14, text=lane, anchor="w", font=("Consolas", 8), fill="#999999")
             for start, end in self.suggestions:
                 if end >= first and start <= last:
                     canvas.create_rectangle(x(start), 8, max(x(end), x(start) + 2), 19,
@@ -387,7 +424,9 @@ class App:
                                   "watched_until": int(self.watched),
                                   "n_frames": int(self.video.count),
                                   "behaviors": ";".join(self.keys.values()),
-                                  "assisted": self.assisted}])
+                                  "assisted": self.assisted,
+                                  "mode": self.mode,
+                                  "seen": mask_to_ranges(self.seen)}])
         replace_rows(self.progress, progress, self.session_id, self.annotator)
 
     def quit(self) -> None:
@@ -414,6 +453,25 @@ def model_suggestions(args, behavior: str) -> list[tuple[int, int]]:
             for a, b in bouts(detect(bundle, behavior, session, FPS))]
 
 
+def model_triage(args, behavior: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Episódios do modelo em três classes: (aceitos, a revisar), em quadros do vídeo."""
+    import joblib
+    from mindtrace_ml.behavior_model import session_features, triage_episodes
+
+    bundle = joblib.load(args.triage)
+    pose = pd.read_csv(args.pose / f"{args.session}.csv", encoding="utf-8-sig")
+    objects = pd.read_csv(args.objects, encoding="utf-8-sig")
+    pixels = pd.read_csv(args.video_features / f"{args.session}.csv", encoding="utf-8-sig")
+    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels)
+    scores = bundle["models"][behavior].predict_proba(session["X"][bundle["features"]])[:, 1]
+    episodes = triage_episodes(scores, session["centers"], len(session["frames"]), session["freezing"], FPS,
+                               args.low, args.high, cut=bundle["thresholds"][behavior], behavior=behavior)
+    frames = session["frames"]
+    accepted = [(int(frames[a]), int(frames[b])) for a, b, _, ok in episodes if ok]
+    review = [(int(frames[a]), int(frames[b])) for a, b, _, ok in episodes if not ok]
+    return accepted, review
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -428,10 +486,20 @@ def main() -> int:
                         help="rotula só este comportamento (e 'não dá para ver')")
     parser.add_argument("--suggest", type=Path, default=None,
                         help="modelo salvo por train_behavior_model: mostra os episódios que ele acha")
+    parser.add_argument("--triage", type=Path, default=None,
+                        help="modelo salvo: três classes, com os seguros já marcados e os duvidosos para revisar")
+    parser.add_argument("--low", type=float, default=0.1, help="com --triage: nota mínima para revisar")
+    parser.add_argument("--high", type=float, default=0.7, help="com --triage: nota para aceitar sem revisar")
     parser.add_argument("--pose", type=Path, default=ROOT / "data" / "pose")
     parser.add_argument("--objects", type=Path, default=ROOT / "data" / "objects.csv")
     parser.add_argument("--video-features", type=Path, default=ROOT / "data" / "video_features")
     args = parser.parse_args()
+    if args.suggest and args.triage:
+        parser.error("use --suggest ou --triage, não os dois")
+    if args.triage and args.only is None:
+        # Só se revisa o comportamento do modelo. Marcar os outros sem assistir a
+        # tudo deixaria rótulos incompletos que a análise trataria como completos.
+        args.only = "rearing"
 
     keys = KEYS
     if args.only:
@@ -442,7 +510,9 @@ def main() -> int:
         print(f"vídeo não encontrado: {path}")
         return 1
 
-    intervals, watched = [], 0
+    video = Video(path)
+    intervals, watched, started = [], 0, False
+    seen = np.zeros(video.count, dtype=bool)
     if args.output.exists():
         previous = pd.read_csv(args.output, encoding="utf-8-sig")
         mine = previous[(previous.session_id == args.session) & (previous.annotator == args.annotator)]
@@ -450,21 +520,34 @@ def main() -> int:
     if args.progress.exists():
         progress = pd.read_csv(args.progress, encoding="utf-8-sig")
         mine = progress[(progress.session_id == args.session) & (progress.annotator == args.annotator)]
-        watched = int(mine.watched_until.max()) if len(mine) else 0
-    if intervals or watched:
-        print(f"continuando: {len(intervals)} intervalos, assistido até o quadro {watched}")
+        started = len(mine) > 0
+        watched = int(mine.watched_until.max()) if started else 0
+        if started:
+            seen = seen_frames(mine, video.count)
+    if intervals or started:
+        print(f"continuando: {len(intervals)} intervalos, {seen.mean():.0%} da sessão visto")
 
     suggestions = []
+    behavior = args.only or "rearing"
     if args.suggest:
-        behavior = args.only or "rearing"
         suggestions = model_suggestions(args, behavior)
         print(f"{len(suggestions)} sugestões de {behavior} do modelo")
+    if args.triage:
+        accepted, suggestions = model_triage(args, behavior)
+        # Na primeira abertura, os seguros entram marcados; depois, valem os salvos.
+        if not started:
+            intervals += [(behavior, start, end) for start, end in accepted]
+        print(f"{len(accepted)} {behavior} aceitos pelo modelo (nota >= {args.high}), "
+              f"{len(suggestions)} duvidosos para revisar (nota entre {args.low} e {args.high})")
 
+    mode = "triage" if args.triage else "suggest" if args.suggest else "blind"
     import tkinter as tk
     root = tk.Tk()
-    app = App(root, Video(path), Annotation(intervals), args.session, args.annotator,
+    app = App(root, video, Annotation(intervals), args.session, args.annotator,
               args.output, args.progress, watched, keys=keys, suggestions=suggestions,
-              assisted=bool(args.suggest))
+              assisted=bool(args.suggest or args.triage), seen=seen, mode=mode)
+    if args.triage and not started:
+        app.save()
     if watched:
         app.seek(watched)
     root.mainloop()
