@@ -14,3 +14,6 @@ HD3_F6_cam2,heittor,15572,36206,rearing;unscorable,False,,
 HD1_F2_cam2,heittor,9328,36258,rearing;unscorable,False,,
 TT_21_cam3,heittor,9174,9175,object_interaction;grooming;rearing;other;unscorable,False,,
 TR_21_cam3,heittor,9243,9244,rearing;unscorable,True,triage,0-9243
+TT_13_cam3,heittor,9166,9167,rearing;unscorable,False,blind,0-9166
+TT_31_cam3,heittor,9171,9172,rearing;unscorable,False,blind,0-9171
+TR_34_cam3,heittor,9233,9234,rearing;unscorable,False,blind,0-9233
