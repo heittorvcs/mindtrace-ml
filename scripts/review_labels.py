@@ -277,10 +277,14 @@ def main() -> int:
     for source in (args.a, args.b):
         table = pd.read_csv(source, encoding="utf-8-sig")
         labels.append(table[table.session_id == args.session])
-    if any(table.empty for table in labels):
-        empty = [str(s) for s, t in zip((args.a, args.b), labels) if t.empty]
-        print(f"{args.session} sem marcações em: {', '.join(empty)}")
+    empty = [name for name, table in zip(names, labels) if table.empty]
+    if len(empty) == 2:
+        print(f"{args.session} sem marcações nas duas fontes")
         return 1
+    if empty:
+        # Uma sessão assistida sem nenhum episódio é legítima (rato imóvel), e é aí que
+        # os alarmes falsos da outra fonte ficam mais à vista.
+        print(f"{args.session}: nenhuma marcação em '{empty[0]}' — tudo o que aparecer é só da outra")
 
     video = Video(path)
     episodes, masks = compare_episodes(*labels, args.behavior, video.count, video.fps)
