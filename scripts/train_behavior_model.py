@@ -172,6 +172,9 @@ def main() -> int:
     parser.add_argument("--behaviors", nargs="+", default=list(BEHAVIORS), choices=BEHAVIORS)
     parser.add_argument("--target-recall", type=float, default=None,
                         help="fração dos episódios a achar (ex.: 0.95); sem ela, equilíbrio F1")
+    parser.add_argument("--results", type=Path, default=None, help="grava os resultados por sessão (CSV)")
+    parser.add_argument("--min-exploration", type=float, default=None,
+                        help="tira do resumo, não do treino, as sessões do NOR com menos segundos de exploração")
     args = parser.parse_args()
     behaviors = args.behaviors
 
@@ -232,14 +235,28 @@ def main() -> int:
                 results.append({"sessão": held, "comportamento": behavior, "método": "cabeça ativa",
                                 **compare(marked[visible], rule[visible], args.fps)})
     results = pd.DataFrame(results)
+    if args.results:
+        results.to_csv(args.results, index=False, encoding="utf-8-sig")
+
+    # O critério de exclusão do NOR: animal que mal explorou os objetos sai da
+    # análise do laboratório, então sai também da medida. Continua no treino, onde
+    # ensina como é um rato imóvel que não está em rearing.
+    excluded = set()
+    if args.min_exploration is not None:
+        movement = pd.read_csv(ROOT / "data" / "movement" / "resumo.csv", encoding="utf-8-sig").set_index("session_id")
+        excluded = {s for s in labeled if s in set(objects.session_id) and s in movement.index
+                    and movement.loc[s, "exploration_total_s"] < args.min_exploration}
 
     print("\n1. sessão deixada de fora — cada linha foi detectada por um modelo que não a viu\n")
+    if excluded:
+        print(f"fora do resumo (exploração < {args.min_exploration:g} s): {', '.join(sorted(excluded))}\n")
     for behavior in behaviors:
         print(f"{behavior}:")
         table = results[results.comportamento == behavior]
         view = table.pivot_table(index="sessão", columns="método",
                                  values=["manual_s", "detected_s", "manual_bouts", "detected_bouts"])
         print(view.round(1).to_string())
+        table = table[~table["sessão"].isin(excluded)]
         chosen = table[table["método"] == "modelo"].limiar
         print(f"\n  limiar escolhido na validação interna: {chosen.min():.2f}–{chosen.max():.2f}")
         print("  média entre sessões:")
@@ -250,6 +267,14 @@ def main() -> int:
                            "episódios achados", "episódios detectados reais", "alarmes falsos por sessão"]
         print(summary.round(2).to_string())
         for method, group in table.groupby("método"):
+            # Somando os episódios de todas as sessões: a média das razões dá a uma
+            # sessão com 2 rearings o mesmo peso de uma com 30.
+            hits = (group.bouts_found.fillna(0) * group.manual_bouts).sum()
+            real = (group.bouts_right.fillna(0) * group.detected_bouts).sum()
+            recall, precision = hits / max(1, group.manual_bouts.sum()), real / max(1, group.detected_bouts.sum())
+            f1 = 2 * recall * precision / (recall + precision) if recall + precision else 0.0
+            print(f"  {method}, somando as sessões: achou {recall:.0%} dos episódios, {precision:.0%} do que "
+                  f"apontou era real, F1 de episódio {f1:.3f}")
             if group.manual_s.sum() > 0 and len(group) > 2:
                 r = np.corrcoef(group.manual_s, group.detected_s)[0, 1]
                 print(f"  {method}: tempo total manual × detectado, r = {r:.2f}")
@@ -265,6 +290,24 @@ def main() -> int:
         final[behavior], thresholds[behavior] = fit_with_threshold(sessions, eligible[behavior], behavior,
                                                                    args.fps, args.target_recall)
 
+    if clips.empty:
+        # Quando todo animal com clipe já tem sessão rotulada, não sobra teste aqui;
+        # a medida fica com a sessão deixada de fora.
+        print("2. nenhum animal com clipes fica fora das sessões rotuladas: etapa pulada")
+    else:
+        clip_evaluation(clips, behaviors, final, thresholds, args, objects)
+
+    if args.save:
+        import joblib
+        args.save.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump({"models": final, "thresholds": thresholds, "target_recall": args.target_recall,
+                     "features": list(sessions[labeled[0]]["X"].columns),
+                     "sessions": labeled}, args.save)
+        print(f"\nmodelos salvos em {args.save}")
+    return 0
+
+
+def clip_evaluation(clips, behaviors, final, thresholds, args, objects) -> None:
     print(f"2. clipes de {clips.session_id.map(animal_of).nunique()} animais que não estão nas sessões "
           f"({len(clips)} clipes) ", end="", flush=True)
     masks = {behavior: {} for behavior in behaviors}
@@ -294,15 +337,6 @@ def main() -> int:
             w_found, w_right = weighted_rates(rep, truth[representative], predicted[representative])
             print(f"{behavior + ' — ' + method:<24} {found:>12.0%} ({int(truth.sum())} clipes)"
                   f" {right:>13.0%}      | rodada representativa: achou {w_found:.0%}, acertou {w_right:.0%}")
-
-    if args.save:
-        import joblib
-        args.save.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"models": final, "thresholds": thresholds, "target_recall": args.target_recall,
-                     "features": list(sessions[labeled[0]]["X"].columns),
-                     "sessions": labeled}, args.save)
-        print(f"\nmodelos salvos em {args.save}")
-    return 0
 
 
 if __name__ == "__main__":
