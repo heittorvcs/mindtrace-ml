@@ -33,6 +33,7 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     gate,
     label_mask,
     make_model,
+    matched_episodes,
     session_features,
     targets,
 )
@@ -87,18 +88,21 @@ def stack(sessions: dict, names, behavior: str):
 
 
 def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
-                       target_recall: float | None = None):
+                       target_recall: float | None = None, select_on=None):
     """Treina nas sessões dadas e escolhe o limiar só com elas.
 
-    O limiar sai de uma validação interna, deixando cada sessão de treino de fora
-    por vez: a sessão de teste não participa da escolha.
+    O limiar sai de uma validação interna, deixando cada animal de treino de fora
+    por vez: a sessão de teste não participa da escolha. `select_on` restringe as
+    sessões que votam no limiar. As assistidas e as excluídas pelo critério do NOR
+    treinam, mas não escolhem.
 
-    Dois critérios. Sem `target_recall`, o equilíbrio entre achar e acertar (F1),
-    para medir tempo sem revisão. Com ele, o limiar mais alto que ainda acha essa
-    fração dos **episódios** — o modo de uso em que o modelo propõe candidatos e
-    o pesquisador descarta os falsos: perder um rearing custa mais que revisar um
-    alarme a mais.
+    Dois critérios. Sem `target_recall`, o F1 de episódios pareados um para um,
+    que é o que conta rearings certo. Antes era o F1 por quadro, que mede tempo.
+    Com `target_recall`, o limiar mais alto que ainda acha essa fração dos
+    episódios: é o modo de uso em que o modelo propõe candidatos e o pesquisador
+    descarta os falsos, e perder um rearing custa mais que revisar um alarme a mais.
     """
+    select_on = list(names) if select_on is None else list(select_on)
     scores = {}
     for inner in names:
         rest = [s for s in names if animal_of(s) != animal_of(inner)]
@@ -107,22 +111,24 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
 
     threshold = 0.5
     if target_recall is None:
-        predicted_all, truth_all = [], []
-        for inner in names:
-            seen = sessions[inner]["seen"]
-            predicted_all.append(scores[inner][seen])
-            truth_all.append(sessions[inner]["y"][behavior].to_numpy()[seen])
-        values, truth = np.concatenate(predicted_all), np.concatenate(truth_all)
         best = -1.0
-        for candidate in np.arange(0.05, 0.96, 0.05):
-            predicted = values >= candidate
-            f1 = 2 * (predicted & truth).sum() / max(1, predicted.sum() + truth.sum())
+        for candidate in np.round(np.arange(0.20, 0.81, 0.05), 2):
+            pairs = manual = found = 0
+            for inner in select_on:
+                data = sessions[inner]
+                mask = gate(behavior, frame_mask(scores[inner], data["centers"], len(data["frames"]),
+                                                 candidate, fps), data["freezing"], fps) & data["visible"]
+                marked, detected = bouts(data["marked"][behavior] & data["visible"]), bouts(mask)
+                pairs += matched_episodes(marked, detected)
+                manual += len(marked)
+                found += len(detected)
+            f1 = 2 * pairs / max(1, manual + found)
             if f1 > best:
                 best, threshold = f1, float(candidate)
     else:
         for candidate in np.arange(0.95, 0.0, -0.01):
             hits = total = 0
-            for inner in names:
+            for inner in select_on:
                 data = sessions[inner]
                 seen = data["visible"]
                 mask = gate(behavior, frame_mask(scores[inner], data["centers"], len(data["frames"]),
@@ -209,6 +215,16 @@ def main() -> int:
         print(".", end="", flush=True)
     print()
 
+    # O critério de exclusão do NOR: animal que mal explorou os objetos sai da
+    # análise do laboratório, então sai também da medida e da escolha do limiar.
+    # Continua no treino, onde ensina como é um rato imóvel que não está em rearing.
+    excluded = set()
+    if args.min_exploration is not None:
+        movement = pd.read_csv(ROOT / "data" / "movement" / "resumo.csv", encoding="utf-8-sig").set_index("session_id")
+        excluded = {s for s in labeled if s in set(objects.session_id) and s in movement.index
+                    and movement.loc[s, "exploration_total_s"] < args.min_exploration}
+    voters = {s for s in labeled if not assisted[s] and s not in excluded}
+
     # --- 1. sessão deixada de fora ------------------------------------------
     # Sessão rotulada só para um comportamento não diz nada sobre os outros; sessão
     # rotulada vendo as sugestões do modelo treina, mas não mede — quem viu a
@@ -222,7 +238,8 @@ def main() -> int:
             train = [s for s in pool if animal_of(s) != animal_of(held)]
             data = sessions[held]
             visible = data["visible"]
-            model, threshold = fit_with_threshold(sessions, train, behavior, args.fps, args.target_recall)
+            model, threshold = fit_with_threshold(sessions, train, behavior, args.fps, args.target_recall,
+                                                  select_on=[s for s in train if s in voters])
             scores = model.predict_proba(data["X"])[:, 1]
             predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
                                                   threshold, args.fps), data["freezing"], args.fps)
@@ -237,15 +254,6 @@ def main() -> int:
     results = pd.DataFrame(results)
     if args.results:
         results.to_csv(args.results, index=False, encoding="utf-8-sig")
-
-    # O critério de exclusão do NOR: animal que mal explorou os objetos sai da
-    # análise do laboratório, então sai também da medida. Continua no treino, onde
-    # ensina como é um rato imóvel que não está em rearing.
-    excluded = set()
-    if args.min_exploration is not None:
-        movement = pd.read_csv(ROOT / "data" / "movement" / "resumo.csv", encoding="utf-8-sig").set_index("session_id")
-        excluded = {s for s in labeled if s in set(objects.session_id) and s in movement.index
-                    and movement.loc[s, "exploration_total_s"] < args.min_exploration}
 
     print("\n1. sessão deixada de fora — cada linha foi detectada por um modelo que não a viu\n")
     if excluded:
@@ -275,6 +283,10 @@ def main() -> int:
             f1 = 2 * recall * precision / (recall + precision) if recall + precision else 0.0
             print(f"  {method}, somando as sessões: achou {recall:.0%} dos episódios, {precision:.0%} do que "
                   f"apontou era real, F1 de episódio {f1:.3f}")
+            pairs, manual, found = group.matched_bouts.sum(), group.manual_bouts.sum(), group.detected_bouts.sum()
+            print(f"  {method}, um para um (cada detecção vale por um rearing): achou {pairs / max(1, manual):.0%}, "
+                  f"certos {pairs / max(1, found):.0%}, F1 {2 * pairs / max(1, manual + found):.3f}, "
+                  f"contagem {100 * (found - manual) / max(1, manual):+.0f}%")
             if group.manual_s.sum() > 0 and len(group) > 2:
                 r = np.corrcoef(group.manual_s, group.detected_s)[0, 1]
                 print(f"  {method}: tempo total manual × detectado, r = {r:.2f}")
@@ -287,8 +299,9 @@ def main() -> int:
 
     final, thresholds = {}, {}
     for behavior in behaviors:
-        final[behavior], thresholds[behavior] = fit_with_threshold(sessions, eligible[behavior], behavior,
-                                                                   args.fps, args.target_recall)
+        final[behavior], thresholds[behavior] = fit_with_threshold(
+            sessions, eligible[behavior], behavior, args.fps, args.target_recall,
+            select_on=[s for s in eligible[behavior] if s in voters])
 
     if clips.empty:
         # Quando todo animal com clipe já tem sessão rotulada, não sobra teste aqui;

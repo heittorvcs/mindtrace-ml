@@ -43,8 +43,18 @@ EXTRA_SPEC = {
     "neck_rel_y": ("median", "p10", "p90"),
     "nose_rel_y": ("median", "p10", "p90"),
     "length_local": ("median", "p10", "std"),
+    # Há quanto tempo o rato está parado e encostado na parede (dwell_signals).
+    # Saem da pose, então entram sempre.
+    "still_sec": ("median", "p10", "p90"),
+    "wall_sec": ("median", "p10", "p90"),
 }
-SCALES = (15, 60, 120)   # quadros: ~0,5 s, 2 s e 4 s a 30 fps
+# Quadros: ~0,5 s, 2 s, 4 s e 10 s a 30 fps. A de 10 s separa o rearing, que sobe
+# e desce em 1 a 3 s, do rato que fica encostado na parede: para as janelas curtas
+# os dois são iguais. Deixando um animal de fora, em 23 sessões, ela levou o F1
+# um para um de 0,751 para 0,777 e, com dwell_signals, para 0,784. Os alarmes
+# falsos foram de 3,5 para 2,4 por sessão: na TT_28, de 30 para 16 detecções
+# (4 marcadas); na TT_26, rato imóvel, de 21 para 2.
+SCALES = (15, 60, 120, 300)
 STEP = 8                 # uma janela a cada ~0,27 s
 MIN_BOUT_SEC = 0.3
 
@@ -105,10 +115,38 @@ def session_features(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
     if pixels is not None:
         signals = pd.concat([signals, pixels.drop(columns="frame", errors="ignore").reset_index(drop=True),
                              pose_rise_signals(pose, kinematics, fps)], axis=1)
+    signals = pd.concat([signals, dwell_signals(signals, fps)], axis=1)
     centers = window_centers(len(pose))
     return {"frames": pose["frame"].to_numpy(), "triaged": triaged, "centers": centers,
             "freezing": triaged["freezing"].to_numpy(bool),
             "X": centered_features(signals, centers)}
+
+
+DWELL_CAP_SEC = 60.0
+WALL_PX = 25.0
+
+
+def run_seconds(flag: np.ndarray, fps: float, cap: float = DWELL_CAP_SEC) -> np.ndarray:
+    """Segundos seguidos em que `flag` vale, até cada quadro; 0 onde não vale."""
+    out = np.zeros(len(flag))
+    run = 0
+    for index, value in enumerate(flag):
+        run = run + 1 if value else 0
+        out[index] = run
+    return np.minimum(out / fps, cap)
+
+
+def dwell_signals(signals: pd.DataFrame, fps: float) -> pd.DataFrame:
+    """Há quanto tempo o rato está parado e há quanto tempo está encostado na parede.
+
+    Parado é abaixo da velocidade de caminhada da camada de movimento, com a
+    velocidade suavizada em 0,5 s. Quadro sem pose não interrompe a contagem: o
+    rato não sumiu andando.
+    """
+    speed = signals["body_speed"].rolling(int(round(0.5 * fps)), center=True, min_periods=1).median()
+    moving = np.nan_to_num(speed.to_numpy(), nan=0.0) > Thresholds().walking_speed
+    at_wall = np.nan_to_num(signals["wall_distance"].to_numpy(), nan=np.inf) < WALL_PX
+    return pd.DataFrame({"still_sec": run_seconds(~moving, fps), "wall_sec": run_seconds(at_wall, fps)})
 
 
 def detect(bundle: dict, behavior: str, session: dict, fps: float) -> np.ndarray:
@@ -262,7 +300,26 @@ def compare(marked: np.ndarray, predicted: np.ndarray, fps: float) -> dict:
         "frames_right": both / predicted.sum() if predicted.any() else np.nan,
         "bouts_found": hit / len(manual) if manual else np.nan,
         "bouts_right": real / len(found) if found else np.nan,
+        "matched_bouts": matched_episodes(manual, found),
     }
+
+
+def matched_episodes(manual: list[tuple[int, int]], found: list[tuple[int, int]]) -> int:
+    """Pares (marcado, detectado) que se cruzam, com cada episódio usado uma vez só.
+
+    É o critério para contar rearings. Por sobreposição, uma detecção longa que
+    encosta em dois rearings vale pelos dois, e duas detecções dentro de um
+    rearing são duas certas. Um para um, fundir vira um acerto e uma perda, e
+    partir vira um acerto e um alarme falso: é o erro que a contagem sente.
+    """
+    used, pairs = set(), 0
+    for start, end in found:
+        for index, (first, last) in enumerate(manual):
+            if index not in used and first <= end and start <= last:
+                used.add(index)
+                pairs += 1
+                break
+    return pairs
 
 
 def make_model(seed: int = 0):
