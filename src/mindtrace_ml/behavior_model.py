@@ -115,7 +115,7 @@ def detect(bundle: dict, behavior: str, session: dict, fps: float) -> np.ndarray
     """Episódios por quadro de um comportamento, com o modelo e o limiar salvos."""
     scores = bundle["models"][behavior].predict_proba(session["X"][bundle["features"]])[:, 1]
     mask = frame_mask(scores, session["centers"], len(session["frames"]),
-                      bundle["thresholds"][behavior], fps)
+                      bundle["thresholds"][behavior], fps, low=bundle.get("low_thresholds", {}).get(behavior))
     return gate(behavior, mask, session["freezing"], fps)
 
 
@@ -160,10 +160,34 @@ def frame_scores(window_scores: np.ndarray, centers: np.ndarray, n_frames: int) 
 
 
 def frame_mask(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,
-               threshold: float, fps: float) -> np.ndarray:
-    """Nota por janela → episódios por quadro, sem trechos curtos demais."""
-    return _sustained(frame_scores(window_scores, centers, n_frames) >= threshold,
-                      int(round(MIN_BOUT_SEC * fps)))
+               threshold: float, fps: float, low: float | None = None) -> np.ndarray:
+    """Nota por janela → episódios por quadro, sem trechos curtos demais.
+
+    Com `low`, histerese: o episódio nasce onde a nota passa de `threshold`, mas
+    só termina quando ela cai abaixo de `low`. A nota sobe e desce mais devagar
+    que o rato, e com um corte único o episódio começa tarde e acaba cedo.
+
+    Medida e não adotada para contar rearings. Deixando um animal de fora, nas
+    23 sessões avaliáveis, com os limiares escolhidos nas outras sessões por
+    pareamento um para um, o corte único (0,45) acha 75% com viés de contagem
+    de 0%, e a histerese (0,6/0,25) acha 70% com viés de -17%. Ela troca
+    rearings achados por precisão (84% contra 75%) e funde rearings vizinhos,
+    porque entre dois deles a nota raramente cai até o limiar baixo.
+    """
+    scores = frame_scores(window_scores, centers, n_frames)
+    mask = scores >= threshold
+    if low is not None and low < threshold:
+        mask = _grow(mask, scores >= low)
+    return _sustained(mask, int(round(MIN_BOUT_SEC * fps)))
+
+
+def _grow(seeds: np.ndarray, allowed: np.ndarray) -> np.ndarray:
+    """Os trechos contínuos de `allowed` que contêm ao menos uma semente."""
+    out = np.zeros_like(allowed)
+    for start, end in bouts(allowed):
+        if seeds[start:end + 1].any():
+            out[start:end + 1] = True
+    return out
 
 
 def triage_episodes(window_scores: np.ndarray, centers: np.ndarray, n_frames: int,

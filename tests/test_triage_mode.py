@@ -73,3 +73,28 @@ class TestSeenFrames:
                                  {"watched_until": 18, "seen": "15-18"}])
 
         assert np.flatnonzero(seen_frames(progress, 20)).tolist() == [0, 1, 2, 3, 15, 16, 17, 18]
+
+
+class TestHysteresis:
+    def test_episode_extends_while_score_stays_above_low(self):
+        from mindtrace_ml.behavior_model import frame_mask
+        window, centers, n = scores_with((100, 160, 0.3), (161, 200, 0.8), (201, 260, 0.3))
+
+        single = frame_mask(window, centers, n, 0.6, FPS)
+        grown = frame_mask(window, centers, n, 0.6, FPS, low=0.2)
+
+        # Corte único: só o pico. Histerese: o pico mais as rampas acima de 0,2.
+        assert single.sum() < grown.sum()
+        assert grown[110] and grown[250] and not single[110]
+
+    def test_low_score_alone_never_starts_an_episode(self):
+        from mindtrace_ml.behavior_model import frame_mask
+        window, centers, n = scores_with((100, 200, 0.3))
+
+        assert not frame_mask(window, centers, n, 0.6, FPS, low=0.2).any()
+
+    def test_without_low_nothing_changes(self):
+        from mindtrace_ml.behavior_model import frame_mask
+        window, centers, n = scores_with((100, 160, 0.3), (161, 200, 0.8))
+
+        assert (frame_mask(window, centers, n, 0.6, FPS) == frame_mask(window, centers, n, 0.6, FPS, low=None)).all()
