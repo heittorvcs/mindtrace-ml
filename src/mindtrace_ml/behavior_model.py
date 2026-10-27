@@ -335,3 +335,73 @@ def make_model(seed: int = 0):
     return HistGradientBoostingClassifier(
         max_depth=3, learning_rate=0.05, max_iter=150, min_samples_leaf=20,
         l2_regularization=1.0, random_state=seed)
+
+
+# Contexto de notas, em janelas (STEP quadros): de ±0,27 s a ±3,2 s, mais o
+# máximo e a média em volta (±1,2 s e ±3,3 s).
+CONTEXT_OFFSETS = (1, 2, 3, 4, 6, 8, 12)
+CONTEXT_SPANS = (9, 25)
+
+
+def score_context(scores: np.ndarray) -> pd.DataFrame:
+    """As notas do primeiro estágio em volta de cada janela, na ordem do vídeo."""
+    s = pd.Series(np.asarray(scores, dtype=float))
+    columns = {"ctx_self": s}
+    for k in CONTEXT_OFFSETS:
+        columns[f"ctx_prev{k}"], columns[f"ctx_next{k}"] = s.shift(k), s.shift(-k)
+    for span in CONTEXT_SPANS:
+        rolling = s.rolling(span, center=True, min_periods=1)
+        columns[f"ctx_max{span}"], columns[f"ctx_mean{span}"] = rolling.max(), rolling.mean()
+    return pd.DataFrame(columns)
+
+
+class ContextModel:
+    """Dois estágios: o segundo vê as features e as notas do primeiro em volta.
+
+    O primeiro estágio julga cada janela sozinha. O segundo aprende com a
+    vizinhança: uma janela de nota mediana entre vizinhas altas faz parte do
+    rearing; um pico isolado é ruído. Deixando um animal de fora, em 23 sessões,
+    o F1 um para um foi de 0,772 para 0,796, com 31 dos 49 rearings curtos achados
+    contra 25 (models/experimentos/modelos.py). Estágios mais profundos não
+    ganharam: ficaram mais precisos, mas contaram de 8% a 13% a menos.
+
+    As notas que o segundo estágio vê no treino vêm de validação cruzada por
+    animal: notas de sessões que o primeiro estágio já viu seriam boas demais, e
+    ele aprenderia a confiar demais nelas.
+
+    `predict_proba` recebe as janelas de **uma sessão inteira, na ordem do vídeo**:
+    o contexto é o das janelas vizinhas na tabela.
+    """
+
+    def __init__(self, folds: int = 5, seed: int = 0):
+        self.folds, self.seed = folds, seed
+
+    def fit_sessions(self, Xs: list, ys: list, groups: list, seen: list | None = None) -> "ContextModel":
+        from sklearn.model_selection import GroupKFold
+
+        Xs = [x.reset_index(drop=True) for x in Xs]
+        seen = [np.ones(len(x), bool) for x in Xs] if seen is None else list(seen)
+        n_groups = len(set(groups))
+        if n_groups < 2:
+            raise ValueError("o contexto precisa de pelo menos 2 animais para a validação cruzada")
+
+        def fit(index):
+            return make_model(self.seed).fit(pd.concat([Xs[i][seen[i]] for i in index]),
+                                             np.concatenate([np.asarray(ys[i])[seen[i]] for i in index]))
+
+        held_out = [None] * len(Xs)
+        for train, test in GroupKFold(n_splits=min(self.folds, n_groups)).split(Xs, groups=groups):
+            model = fit(train)
+            for i in test:
+                held_out[i] = model.predict_proba(Xs[i])[:, 1]
+        self.first = fit(range(len(Xs)))
+        Z = pd.concat([self._stack(x, s)[m] for x, s, m in zip(Xs, held_out, seen)])
+        self.second = make_model(self.seed).fit(Z, np.concatenate([np.asarray(y)[m] for y, m in zip(ys, seen)]))
+        return self
+
+    @staticmethod
+    def _stack(X: pd.DataFrame, first_scores: np.ndarray) -> pd.DataFrame:
+        return pd.concat([X.reset_index(drop=True), score_context(first_scores)], axis=1)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.second.predict_proba(self._stack(X, self.first.predict_proba(X)[:, 1]))

@@ -16,6 +16,7 @@ Uso:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mindtrace_ml.behavior_model import (  # noqa: E402
     BEHAVIORS,
+    ContextModel,
     bouts,
     compare,
     frame_mask,
@@ -81,14 +83,21 @@ def load_clips() -> pd.DataFrame:
     return clips[~ambiguous & ~unscorable].reset_index(drop=True)
 
 
-def stack(sessions: dict, names, behavior: str):
+def fit_model(sessions: dict, names, behavior: str, context: bool = True):
+    """O detector treinado nas sessões dadas: dois estágios (ContextModel) ou um só."""
+    names = list(names)
+    if context:
+        return ContextModel().fit_sessions([sessions[s]["X"] for s in names],
+                                           [sessions[s]["y"][behavior].to_numpy() for s in names],
+                                           [animal_of(s) for s in names],
+                                           [sessions[s]["seen"] for s in names])
     X = pd.concat([sessions[s]["X"][sessions[s]["seen"]] for s in names])
     y = np.concatenate([sessions[s]["y"][behavior].to_numpy()[sessions[s]["seen"]] for s in names])
-    return X, y
+    return make_model().fit(X, y)
 
 
 def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
-                       target_recall: float | None = None, select_on=None):
+                       target_recall: float | None = None, select_on=None, context: bool = True):
     """Treina nas sessões dadas e escolhe o limiar só com elas.
 
     O limiar sai de uma validação interna, deixando cada animal de treino de fora
@@ -106,7 +115,7 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
     scores = {}
     for inner in names:
         rest = [s for s in names if animal_of(s) != animal_of(inner)]
-        model = make_model().fit(*stack(sessions, rest, behavior))
+        model = fit_model(sessions, rest, behavior, context)
         scores[inner] = model.predict_proba(sessions[inner]["X"])[:, 1]
 
     threshold = 0.5
@@ -139,7 +148,27 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
             threshold = float(candidate)
             if total and hits / total >= target_recall:
                 break
-    return make_model().fit(*stack(sessions, names, behavior)), threshold
+    return fit_model(sessions, names, behavior, context), threshold
+
+
+def progress_line(held: str, done: int, total: int) -> None:
+    """Uma linha por sessão deixada de fora: o treino com contexto leva horas."""
+    from datetime import datetime
+    print(f"  {datetime.now():%H:%M} {held} pronta ({done}/{total})", flush=True)
+
+
+# Sessões do treino, herdadas pelos processos filhos (fork) sem serializar.
+SESSIONS: dict = {}
+
+
+def held_out_scores(held: str, train: list, behavior: str, fps: float, target_recall, voters: set,
+                    context: bool, threads: int | None = None):
+    """Limiar e notas de uma sessão, com o modelo e a escolha feitos sem o animal dela."""
+    from threadpoolctl import threadpool_limits
+    with threadpool_limits(threads):
+        model, threshold = fit_with_threshold(SESSIONS, train, behavior, fps, target_recall,
+                                              select_on=[s for s in train if s in voters], context=context)
+        return threshold, model.predict_proba(SESSIONS[held]["X"])[:, 1]
 
 
 def presence(clips: pd.DataFrame, masks: dict) -> np.ndarray:
@@ -181,6 +210,10 @@ def main() -> int:
     parser.add_argument("--results", type=Path, default=None, help="grava os resultados por sessão (CSV)")
     parser.add_argument("--min-exploration", type=float, default=None,
                         help="tira do resumo, não do treino, as sessões do NOR com menos segundos de exploração")
+    parser.add_argument("--no-context", action="store_true",
+                        help="um estágio só, como até o v6 (sem as notas das janelas vizinhas)")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="sessões deixadas de fora treinadas em paralelo (processos)")
     args = parser.parse_args()
     behaviors = args.behaviors
 
@@ -229,18 +262,38 @@ def main() -> int:
     # Sessão rotulada só para um comportamento não diz nada sobre os outros; sessão
     # rotulada vendo as sugestões do modelo treina, mas não mede — quem viu a
     # sugestão tende a concordar com ela.
+    context = not args.no_context
+    SESSIONS.update(sessions)
     results = []
     for behavior in behaviors:
         pool = eligible[behavior]
-        for held in [s for s in pool if not assisted[s]]:
-            # Fora o animal, não só a sessão: as do modo de três classes são, de
-            # propósito, segundas sessões de animais já rotulados às cegas.
-            train = [s for s in pool if animal_of(s) != animal_of(held)]
+        held_list = [s for s in pool if not assisted[s]]
+        # Fora o animal, não só a sessão: as do modo de três classes são, de
+        # propósito, segundas sessões de animais já rotulados às cegas.
+        jobs = [(held, [s for s in pool if animal_of(s) != animal_of(held)]) for held in held_list]
+        if args.jobs > 1:
+            # Processos, e não threads: cada treino é pequeno e o HistGradientBoosting
+            # mal ocupa 2 núcleos. O fork herda as sessões sem copiá-las.
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            threads = max(1, (os.cpu_count() or 2) // args.jobs)
+            from concurrent.futures import as_completed
+            with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("fork")) as pool_exec:
+                futures = {pool_exec.submit(held_out_scores, held, train, behavior, args.fps, args.target_recall,
+                                            voters, context, threads): held for held, train in jobs}
+                done = {}
+                for future in as_completed(futures):
+                    done[futures[future]] = future.result()
+                    progress_line(futures[future], len(done), len(jobs))
+            outcomes = [done[held] for held in held_list]
+        else:
+            outcomes = []
+            for held, train in jobs:
+                outcomes.append(held_out_scores(held, train, behavior, args.fps, args.target_recall, voters, context))
+                progress_line(held, len(outcomes), len(jobs))
+        for held, (threshold, scores) in zip(held_list, outcomes):
             data = sessions[held]
             visible = data["visible"]
-            model, threshold = fit_with_threshold(sessions, train, behavior, args.fps, args.target_recall,
-                                                  select_on=[s for s in train if s in voters])
-            scores = model.predict_proba(data["X"])[:, 1]
             predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
                                                   threshold, args.fps), data["freezing"], args.fps)
             marked = data["marked"][behavior]
@@ -299,9 +352,10 @@ def main() -> int:
 
     final, thresholds = {}, {}
     for behavior in behaviors:
+        print(f"treinando o modelo final de {behavior} com todas as sessões", flush=True)
         final[behavior], thresholds[behavior] = fit_with_threshold(
             sessions, eligible[behavior], behavior, args.fps, args.target_recall,
-            select_on=[s for s in eligible[behavior] if s in voters])
+            select_on=[s for s in eligible[behavior] if s in voters], context=context)
 
     if clips.empty:
         # Quando todo animal com clipe já tem sessão rotulada, não sobra teste aqui;
@@ -314,6 +368,7 @@ def main() -> int:
         import joblib
         args.save.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"models": final, "thresholds": thresholds, "target_recall": args.target_recall,
+                     "context": context,
                      "features": list(sessions[labeled[0]]["X"].columns),
                      "sessions": labeled}, args.save)
         print(f"\nmodelos salvos em {args.save}")
