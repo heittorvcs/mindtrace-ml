@@ -40,6 +40,7 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     targets,
 )
 from mindtrace_ml.agreement import total_error  # noqa: E402
+from mindtrace_ml.arena import floor_for, load_floors  # noqa: E402
 from mindtrace_ml.labels import seen_frames  # noqa: E402
 from mindtrace_ml.schema import SESSION_BEHAVIORS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of, label_sets  # noqa: E402
@@ -56,7 +57,8 @@ VIDEO_FEATURES = ROOT / "data" / "video_features"
 
 
 def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
-            video: bool = True) -> dict:
+            video: bool = True, floors: dict | None = None) -> dict:
+    """Features de uma sessão; com `floors`, a parede é o chão marcado (arena.floor_for)."""
     pose = pd.read_csv(pose_dir / f"{session}.csv", encoding="utf-8-sig")
     pixels = None
     if video:
@@ -64,7 +66,8 @@ def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
         if not cached.exists():
             raise FileNotFoundError(f"{cached}: rode extract_video_features.py (ou use --no-video)")
         pixels = pd.read_csv(cached, encoding="utf-8-sig")
-    return session_features(pose, objects[objects.session_id == session], fps, pixels)
+    floor = floor_for(session, pose, floors) if floors is not None else None
+    return session_features(pose, objects[objects.session_id == session], fps, pixels, floor=floor)
 
 
 def load_clips() -> pd.DataFrame:
@@ -98,7 +101,8 @@ def fit_model(sessions: dict, names, behavior: str, context: bool = True):
 
 
 def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
-                       target_recall: float | None = None, select_on=None, context: bool = True):
+                       target_recall: float | None = None, select_on=None, context: bool = True,
+                       fixed: float | None = None):
     """Treina nas sessões dadas e escolhe o limiar só com elas.
 
     O limiar sai de uma validação interna, deixando cada animal de treino de fora
@@ -111,7 +115,14 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
     Com `target_recall`, o limiar mais alto que ainda acha essa fração dos
     episódios: é o modo de uso em que o modelo propõe candidatos e o pesquisador
     descarta os falsos, e perder um rearing custa mais que revisar um alarme a mais.
+
+    Com `fixed`, não há busca: o limiar é esse. A busca treina de novo para cada
+    animal de treino deixado de fora, e era ela que levava o v7 e o v8 a mais de 7 h.
+    Além disso, o limiar escolhido por animal espalhou (0,45–0,70 no v7) e contou
+    pior que um fixo (models/experimentos/counting.py).
     """
+    if fixed is not None:
+        return fit_model(sessions, names, behavior, context), float(fixed)
     select_on = list(names) if select_on is None else list(select_on)
     scores = {}
     for inner in names:
@@ -163,12 +174,13 @@ SESSIONS: dict = {}
 
 
 def held_out_scores(held: str, train: list, behavior: str, fps: float, target_recall, voters: set,
-                    context: bool, threads: int | None = None):
+                    context: bool, threads: int | None = None, fixed: float | None = None):
     """Limiar e notas de uma sessão, com o modelo e a escolha feitos sem o animal dela."""
     from threadpoolctl import threadpool_limits
     with threadpool_limits(threads):
         model, threshold = fit_with_threshold(SESSIONS, train, behavior, fps, target_recall,
-                                              select_on=[s for s in train if s in voters], context=context)
+                                              select_on=[s for s in train if s in voters], context=context,
+                                              fixed=fixed)
         return threshold, model.predict_proba(SESSIONS[held]["X"])[:, 1]
 
 
@@ -218,6 +230,10 @@ def main() -> int:
     parser.add_argument("--fixed-threshold", type=float, default=0.40,
                         help="mede também cada sessão deixada de fora com este limiar único, como no uso "
                              "(padrão 0,40, o do v7, escolhido antes destas sessões); negativo desliga")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="limiar do modelo, sem a busca interna (horas mais rápido); sem ele, a busca do v7")
+    parser.add_argument("--no-floor", action="store_true",
+                        help="parede estimada pelos percentis do dorso, como até o v8, em vez do chão marcado")
     args = parser.parse_args()
     behaviors = args.behaviors
 
@@ -239,10 +255,14 @@ def main() -> int:
     assisted = progress.groupby("session_id").assisted.any().to_dict()
     eligible = {b: [s for s in labeled if b in covers.get(s, set())] for b in behaviors}
 
+    floors = None if args.no_floor else load_floors(ROOT / "data" / "arena_floor.csv")
+    args.floors = floors
+    if floors is not None and not floors:
+        parser.error("data/arena_floor.csv não existe: marque com scripts/mark_arena.py ou use --no-floor")
     print(f"preparando {len(labeled)} sessões rotuladas ", end="", flush=True)
     sessions = {}
     for session in labeled:
-        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
+        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video, floors=floors)
         data["visible"] = seen_frames(progress[progress.session_id == session], len(data["frames"]))
         data["seen"] = data["visible"][data["centers"]]
         own = labels[labels.session_id == session]
@@ -284,7 +304,7 @@ def main() -> int:
             from concurrent.futures import as_completed
             with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("fork")) as pool_exec:
                 futures = {pool_exec.submit(held_out_scores, held, train, behavior, args.fps, args.target_recall,
-                                            voters, context, threads): held for held, train in jobs}
+                                            voters, context, threads, args.threshold): held for held, train in jobs}
                 done = {}
                 for future in as_completed(futures):
                     done[futures[future]] = future.result()
@@ -293,7 +313,8 @@ def main() -> int:
         else:
             outcomes = []
             for held, train in jobs:
-                outcomes.append(held_out_scores(held, train, behavior, args.fps, args.target_recall, voters, context))
+                outcomes.append(held_out_scores(held, train, behavior, args.fps, args.target_recall, voters, context,
+                                                fixed=args.threshold))
                 progress_line(held, len(outcomes), len(jobs))
         for held, (threshold, scores) in zip(held_list, outcomes):
             data = sessions[held]
@@ -378,7 +399,7 @@ def main() -> int:
         print(f"treinando o modelo final de {behavior} com todas as sessões", flush=True)
         final[behavior], thresholds[behavior] = fit_with_threshold(
             sessions, eligible[behavior], behavior, args.fps, args.target_recall,
-            select_on=[s for s in eligible[behavior] if s in voters], context=context)
+            select_on=[s for s in eligible[behavior] if s in voters], context=context, fixed=args.threshold)
 
     if clips.empty:
         # Quando todo animal com clipe já tem sessão rotulada, não sobra teste aqui;
@@ -391,7 +412,7 @@ def main() -> int:
         import joblib
         args.save.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"models": final, "thresholds": thresholds, "target_recall": args.target_recall,
-                     "context": context,
+                     "context": context, "floor": floors is not None,
                      "features": list(sessions[labeled[0]]["X"].columns),
                      "sessions": labeled}, args.save)
         print(f"\nmodelos salvos em {args.save}")
@@ -404,7 +425,7 @@ def clip_evaluation(clips, behaviors, final, thresholds, args, objects) -> None:
     masks = {behavior: {} for behavior in behaviors}
     head = {}
     for session in sorted(clips.session_id.unique()):
-        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video)
+        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video, floors=args.floors)
         n = len(data["frames"])
         for behavior in behaviors:
             scores = final[behavior].predict_proba(data["X"])[:, 1]

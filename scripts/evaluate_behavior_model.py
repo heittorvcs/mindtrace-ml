@@ -22,6 +22,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from mindtrace_ml.arena import model_floor  # noqa: E402
 from mindtrace_ml.behavior_model import (  # noqa: E402
     bouts,
     compare,
@@ -69,7 +70,8 @@ def main() -> int:
         session = record.session_id
         pose = pd.read_csv(args.pose / f"{session}.csv", encoding="utf-8-sig")
         pixels = pd.read_csv(args.video_features / f"{session}.csv", encoding="utf-8-sig")
-        data = session_features(pose, objects[objects.session_id == session], args.fps, pixels)
+        data = session_features(pose, objects[objects.session_id == session], args.fps, pixels,
+                                floor=model_floor(bundle, session, pose, ROOT / "data" / "arena_floor.csv"))
         seen = data["frames"] <= record.watched_until
         marked = label_mask(labels[labels.session_id == session], args.behavior,
                             data["frames"], args.fps)[seen]

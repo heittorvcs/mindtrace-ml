@@ -37,3 +37,44 @@ class TestFloorDistance:
 
     def test_missing_point_stays_missing(self):
         assert np.isnan(floor_distance(np.array([np.nan]), np.array([50.0]), FLOOR)[0])
+
+
+class TestFloorFor:
+    def test_marked_floor_wins_and_habituation_falls_back_to_the_body_rectangle(self):
+        import pandas as pd
+        from mindtrace_ml.arena import floor_for
+
+        pose = pd.DataFrame({"body_x": np.linspace(100, 200, 101), "body_y": np.linspace(50, 150, 101),
+                             "body_p": np.full(101, 0.9)})
+
+        assert np.array_equal(floor_for("TT_5_cam1", pose, {"NOR_cam1": FLOOR}), FLOOR)
+        rectangle = floor_for("HD3_F6_cam2", pose, {"NOR_cam1": FLOOR})
+        assert np.allclose(rectangle, [[101, 51], [199, 51], [199, 149], [101, 149]])
+
+
+class TestWithFloor:
+    def test_nose_over_the_wall_is_negative(self):
+        import pandas as pd
+        from mindtrace_ml.behavior_model import with_floor
+
+        pose = pd.DataFrame({"nose_x": [210.0, 210.0], "nose_y": [110.0, 5.0], "nose_p": [0.9, 0.9],
+                             "neck_x": [210.0, 210.0], "neck_y": [120.0, 30.0], "neck_p": [0.9, 0.1]})
+
+        out = with_floor(pd.DataFrame({"wall_distance": [0.0, 0.0]}), pose, FLOOR)
+
+        assert out.nose_floor.tolist() == [90.0, -15.0]
+        assert out.wall_distance.iloc[0] == 80.0 and np.isnan(out.wall_distance.iloc[1])   # pescoço incerto: sem ponto
+
+
+class TestModelFloor:
+    def test_old_models_get_no_floor_new_ones_get_theirs(self, tmp_path):
+        import pandas as pd
+        from mindtrace_ml.arena import model_floor
+
+        path = tmp_path / "arena_floor.csv"
+        pd.DataFrame([{"arena": "NOR_cam1", "corner": i + 1, "x": x, "y": y} for i, (x, y) in enumerate(FLOOR)]).to_csv(path, index=False)
+        pose = pd.DataFrame({"body_x": [150.0], "body_y": [100.0], "body_p": [0.9]})
+
+        assert model_floor({"models": {}}, "TT_5_cam1", pose, path) is None        # v1–v8: sem a chave
+        assert model_floor(None, "TT_5_cam1", pose, path) is None
+        assert np.array_equal(model_floor({"floor": True}, "TT_5_cam1", pose, path), FLOOR)

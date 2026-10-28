@@ -37,6 +37,23 @@ def load_floors(path: str | Path) -> dict[str, np.ndarray]:
     return {arena: group[["x", "y"]].to_numpy(float) for arena, group in table.groupby("arena")}
 
 
+def floor_for(session_id: str, pose: pd.DataFrame, floors: dict, threshold: float = 0.25) -> np.ndarray:
+    """O chão marcado da arena da sessão ou, sem marcação, o retângulo dos percentis do dorso.
+
+    O retângulo é a parede que as features usavam antes do chão marcado: os
+    percentis 1 e 99 da posição do dorso. Fica para a habituação, cujos vídeos
+    se perderam antes da marcação.
+    """
+    floor = floors.get(arena_of(session_id))
+    if floor is not None:
+        return floor
+    ok = pose["body_p"].to_numpy() >= threshold
+    x, y = pose["body_x"].to_numpy()[ok], pose["body_y"].to_numpy()[ok]
+    low_x, high_x = np.nanpercentile(x, [1, 99])
+    low_y, high_y = np.nanpercentile(y, [1, 99])
+    return np.array([[low_x, low_y], [high_x, low_y], [high_x, high_y], [low_x, high_y]])
+
+
 def floor_distance(x: np.ndarray, y: np.ndarray, floor: np.ndarray) -> np.ndarray:
     """Distância com sinal até a borda do chão: positiva dentro, negativa fora, NaN sem ponto.
 
@@ -63,3 +80,17 @@ def inside(x: np.ndarray, y: np.ndarray, polygon: np.ndarray) -> np.ndarray:
             crosses = ((ay > y) != (by > y)) & (x < (bx - ax) * (y - ay) / (by - ay) + ax)
         result ^= np.nan_to_num(crosses, nan=False).astype(bool)
     return result
+
+
+_FLOORS: dict = {}
+
+
+def model_floor(bundle: dict | None, session_id: str, pose: pd.DataFrame, path: str | Path) -> np.ndarray | None:
+    """O chão que as features de um modelo salvo precisam: o da sessão, se ele foi
+    treinado com chão (bundle["floor"]); None nos modelos até o v8."""
+    if not bundle or not bundle.get("floor"):
+        return None
+    key = str(path)
+    if key not in _FLOORS:
+        _FLOORS[key] = load_floors(path)
+    return floor_for(session_id, pose, _FLOORS[key])

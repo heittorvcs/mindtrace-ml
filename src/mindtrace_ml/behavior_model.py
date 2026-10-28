@@ -21,9 +21,11 @@ muitas vezes misturado a outros comportamentos, e de pouco valor para o NOR.
 import numpy as np
 import pandas as pd
 
+from .arena import floor_distance
 from .detectors import Thresholds, _sustained, triage
 from .kinematics import frame_kinematics
 from .labels import bouts_for, intervals_to_mask
+from .schema import CONFIDENCE_THRESHOLD
 from .triage_model import KEYPOINTS, SPEC, describe, frame_signals
 from .video_features import pose_rise_signals
 
@@ -47,6 +49,9 @@ EXTRA_SPEC = {
     # Saem da pose, então entram sempre.
     "still_sec": ("median", "p10", "p90"),
     "wall_sec": ("median", "p10", "p90"),
+    # Focinho até a borda do chão marcado: negativo quando a cabeça aparece sobre a
+    # parede, o rato em pé na câmera oblíqua. Só com o chão (session_features).
+    "nose_floor": ("median", "p10", "p90"),
 }
 # Quadros: ~0,5 s, 2 s, 4 s e 10 s a 30 fps. A de 10 s separa o rearing, que sobe
 # e desce em 1 a 3 s, do rato que fica encostado na parede: para as janelas curtas
@@ -71,7 +76,7 @@ MERGE_GAP_SEC = {"rearing": 0.5}
 # não distingue o corpo encurtando do corpo voltando ao normal.
 TREND_SIGNALS = ("length_local", "blob_height", "blob_width", "blob_aspect", "blob_area",
                  "blob_dy", "neck_rel_y", "nose_rel_y", "full_length", "body_length",
-                 "conf_nose", "motion_body", "body_speed", "wall_distance")
+                 "conf_nose", "motion_body", "body_speed", "wall_distance", "nose_floor")
 
 
 def behavior_spec(signals: pd.DataFrame) -> dict:
@@ -104,10 +109,18 @@ def centered_features(signals: pd.DataFrame, centers: np.ndarray, scales=SCALES,
 
 
 def session_features(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
-                     pixels: pd.DataFrame | None = None) -> dict:
+                     pixels: pd.DataFrame | None = None, floor: np.ndarray | None = None) -> dict:
     """Tudo o que os detectores precisam de uma sessão.
 
     `pixels` é o cache de extract_video_features; sem ele, só sinais de pose.
+
+    `floor` é o chão da arena (arena.floor_for). A distância à parede passa a ser
+    a do pescoço até a borda dele, e entra o focinho até a borda. Sem ele, a parede
+    é o retângulo dos percentis do dorso, como até o v8. Deixando um animal de
+    fora, em 23 sessões, com dois estágios e limiar 0,40, o chão levou o F1 um
+    para um de 0,765 para 0,811, a precisão de 76% para 81% e o erro de contagem
+    por sessão de 41% para 22% (models/experimentos/floor3.py). Na TT_28, rato
+    parado na parede, foram de 15 para 9 detecções (4 marcadas).
     """
     kinematics = frame_kinematics(pose, KEYPOINTS, fps)
     triaged = triage(pose, kinematics, objects, fps, Thresholds())
@@ -115,11 +128,25 @@ def session_features(pose: pd.DataFrame, objects: pd.DataFrame, fps: float,
     if pixels is not None:
         signals = pd.concat([signals, pixels.drop(columns="frame", errors="ignore").reset_index(drop=True),
                              pose_rise_signals(pose, kinematics, fps)], axis=1)
+    if floor is not None:
+        signals = with_floor(signals, pose, floor)
     signals = pd.concat([signals, dwell_signals(signals, fps)], axis=1)
     centers = window_centers(len(pose))
     return {"frames": pose["frame"].to_numpy(), "triaged": triaged, "centers": centers,
             "freezing": triaged["freezing"].to_numpy(bool),
             "X": centered_features(signals, centers)}
+
+
+def with_floor(signals: pd.DataFrame, pose: pd.DataFrame, floor: np.ndarray) -> pd.DataFrame:
+    """Parede medida até a borda do chão dado, mais o focinho até ela."""
+    def point(name):
+        ok = pose[f"{name}_p"].to_numpy() >= CONFIDENCE_THRESHOLD
+        return np.where(ok, pose[f"{name}_x"], np.nan), np.where(ok, pose[f"{name}_y"], np.nan)
+
+    out = signals.copy()
+    out["wall_distance"] = floor_distance(*point("neck"), floor)
+    out["nose_floor"] = floor_distance(*point("nose"), floor)
+    return out
 
 
 DWELL_CAP_SEC = 60.0

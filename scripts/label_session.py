@@ -523,13 +523,15 @@ class App:
 def model_suggestions(args, behavior: str) -> list[tuple[int, int]]:
     """Episódios que o modelo salvo acha nesta sessão, em quadros do vídeo."""
     import joblib
+    from mindtrace_ml.arena import model_floor
     from mindtrace_ml.behavior_model import bouts, detect, session_features
 
     bundle = joblib.load(args.suggest)
     pose = pd.read_csv(args.pose / f"{args.session}.csv", encoding="utf-8-sig")
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
     pixels = pd.read_csv(args.video_features / f"{args.session}.csv", encoding="utf-8-sig")
-    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels)
+    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels,
+                               floor=model_floor(bundle, args.session, pose, ROOT / "data" / "arena_floor.csv"))
     frames = session["frames"]
     return [(int(frames[a]), int(frames[b]))
             for a, b in bouts(detect(bundle, behavior, session, FPS))]
@@ -538,13 +540,15 @@ def model_suggestions(args, behavior: str) -> list[tuple[int, int]]:
 def model_triage(args, behavior: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
     """Episódios do modelo em três classes: (aceitos, a revisar), em quadros do vídeo."""
     import joblib
+    from mindtrace_ml.arena import model_floor
     from mindtrace_ml.behavior_model import session_features, triage_episodes
 
     bundle = joblib.load(args.triage)
     pose = pd.read_csv(args.pose / f"{args.session}.csv", encoding="utf-8-sig")
     objects = pd.read_csv(args.objects, encoding="utf-8-sig")
     pixels = pd.read_csv(args.video_features / f"{args.session}.csv", encoding="utf-8-sig")
-    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels)
+    session = session_features(pose, objects[objects.session_id == args.session], FPS, pixels,
+                               floor=model_floor(bundle, args.session, pose, ROOT / "data" / "arena_floor.csv"))
     scores = bundle["models"][behavior].predict_proba(session["X"][bundle["features"]])[:, 1]
     episodes = triage_episodes(scores, session["centers"], len(session["frames"]), session["freezing"], FPS,
                                args.low, args.high, cut=bundle["thresholds"][behavior], behavior=behavior)

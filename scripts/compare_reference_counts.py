@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mindtrace_ml.agreement import agreement  # noqa: E402
+from mindtrace_ml.arena import model_floor  # noqa: E402
 from mindtrace_ml.behavior_model import MERGE_GAP_SEC, bouts, frame_mask, gate, session_features  # noqa: E402
 from mindtrace_ml.kinematics import frame_kinematics  # noqa: E402
 from mindtrace_ml.movement import movement_layer  # noqa: E402
@@ -113,7 +114,8 @@ def main() -> int:
         pose = pd.read_csv(args.pose / f"{session}.csv", encoding="utf-8-sig")
         pixels = pd.read_csv(args.video_features / f"{session}.csv", encoding="utf-8-sig")
         session_objects = objects[objects.session_id == session]
-        data = session_features(pose, session_objects, args.fps, pixels)
+        data = session_features(pose, session_objects, args.fps, pixels,
+                                floor=model_floor(bundle, session, pose, ROOT / "data" / "arena_floor.csv"))
         scores = bundle["models"][args.behavior].predict_proba(data["X"][bundle["features"]])[:, 1]
         start = arrival(pose, args.fps)
         layer = movement_layer(pose, frame_kinematics(pose, KEYPOINTS, args.fps), session_objects, args.fps)
