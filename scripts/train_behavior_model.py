@@ -215,6 +215,9 @@ def main() -> int:
                         help="um estágio só, como até o v6 (sem as notas das janelas vizinhas)")
     parser.add_argument("--jobs", type=int, default=1,
                         help="sessões deixadas de fora treinadas em paralelo (processos)")
+    parser.add_argument("--fixed-threshold", type=float, default=0.40,
+                        help="mede também cada sessão deixada de fora com este limiar único, como no uso "
+                             "(padrão 0,40, o do v7, escolhido antes destas sessões); negativo desliga")
     args = parser.parse_args()
     behaviors = args.behaviors
 
@@ -301,6 +304,15 @@ def main() -> int:
             results.append({"sessão": held, "comportamento": behavior, "método": "modelo",
                             "limiar": threshold,
                             **compare(marked[visible], predicted[visible], args.fps)})
+            # O uso tem um limiar só para todas as sessões. O escolhido a cada animal
+            # deixado de fora variou de 0,45 a 0,70 no v7, e com ele a contagem foi a
+            # -8%; nas mesmas notas, com 0,40 para todos, ficou em -1%.
+            if args.fixed_threshold >= 0:
+                fixed = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
+                                                  args.fixed_threshold, args.fps), data["freezing"], args.fps)
+                results.append({"sessão": held, "comportamento": behavior,
+                                "método": f"limiar fixo {args.fixed_threshold:.2f}", "limiar": args.fixed_threshold,
+                                **compare(marked[visible], fixed[visible], args.fps)})
             if behavior == "grooming":
                 rule = data["triaged"]["active_head"].to_numpy(bool)
                 results.append({"sessão": held, "comportamento": behavior, "método": "cabeça ativa",
