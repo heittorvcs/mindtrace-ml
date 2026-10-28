@@ -174,10 +174,15 @@ class Stepper:
     Segurando a tecla, o sistema a repete mais depressa do que um quadro é lido e
     desenhado. Os eventos se acumulavam na fila, e o vídeo seguia andando depois
     de soltar. Aqui o aperto anda um passo, a repetição do teclado é ignorada, e,
-    depois de DELAY_MS segurando, um laço próprio anda um passo por vez, cada um
-    só depois do desenho do anterior. No X11, a repetição chega como soltar e
-    apertar de novo quase juntos; por isso soltar só vale se nenhum aperto vier
-    em RELEASE_MS.
+    depois de DELAY_MS segurando, um laço próprio anda um passo por vez. No X11,
+    a repetição chega como soltar e apertar de novo quase juntos; por isso soltar
+    só vale se nenhum aperto vier em RELEASE_MS.
+
+    O laço anda quando a janela está ociosa, e não num tempo fixo. Com um
+    temporizador, o Tk alternava uma tecla e um passo; como a repetição manda
+    duas teclas a cada 30 ms e um passo leva ~30 ms, a fila crescia, e a soltura
+    chegava segundos depois (2,9 s depois de 3,6 s segurando, medido no notebook
+    em Wayland). O ocioso só roda com a fila de teclas vazia.
     """
 
     DELAY_MS = 300
@@ -204,8 +209,15 @@ class Stepper:
         self.loop_id = None
         if self.held is None:
             return
+        if self.release_id is not None:
+            # Soltou e o aperto da repetição ainda não veio: espera, sem andar.
+            self.loop_id = self.root.after(5, self.tick)
+            return
         self.step(*self.held)
-        self.loop_id = self.root.after(self.BIG_EVERY_MS if self.held[1] else 1, self.tick)
+        if self.held[1]:
+            self.loop_id = self.root.after(self.BIG_EVERY_MS, self.tick)
+        else:
+            self.loop_id = self.root.after_idle(self.tick)
 
     def release(self, key: str) -> None:
         if self.held is None or self.held[0] != key:

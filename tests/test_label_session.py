@@ -120,88 +120,112 @@ class TestSuggestions:
         assert annotation.intervals == [("object_interaction", 0, 100)]
 
 
-class FakeRoot:
-    """Relógio de mentira com o after/after_cancel do Tk. Cada passo custa 30 ms de
-    desenho, como no notebook; o que vence enquanto isso espera, como na fila do Tk."""
+class FakeTk:
+    """Laço de eventos com o comportamento do registro real (sessão de 2026-10-28):
+    com teclas na fila, o Tk trata uma tecla e depois um temporizador vencido, e o
+    que é ocioso (after_idle) só roda com a fila de teclas vazia. Cada passo custa
+    STEP_MS de desenho, e cada tecla, KEY_MS."""
+    STEP_MS = 30
+    KEY_MS = 1     # tratar uma tecla também custa: é Python rodando
 
     def __init__(self):
-        self.now, self.queue, self.count = 0, [], 0
+        self.now, self.timers, self.idle, self.keys, self.count = 0.0, [], [], [], 0
 
     def after(self, ms, callback):
         self.count += 1
-        self.queue.append((self.now + ms, self.count, callback))
+        self.timers.append((self.now + ms, self.count, callback))
+        return self.count
+
+    def after_idle(self, callback):
+        self.count += 1
+        self.idle.append((self.count, callback))
         return self.count
 
     def after_cancel(self, ident):
-        self.queue = [item for item in self.queue if item[1] != ident]
+        self.timers = [t for t in self.timers if t[1] != ident]
+        self.idle = [i for i in self.idle if i[0] != ident]
+
+    def key(self, at, callback):
+        self.keys.append((at, self.count, callback)); self.count += 1
 
     def run_until(self, until):
-        while True:
-            due = sorted(item for item in self.queue if item[0] <= until)
-            if not due:
+        while self.now <= until:
+            arrived = sorted(k for k in self.keys if k[0] <= self.now)
+            due = sorted(t for t in self.timers if t[0] <= self.now)
+            if arrived:
+                self.keys.remove(arrived[0]); arrived[0][2]()
+                self.now += self.KEY_MS
+                due = sorted(t for t in self.timers if t[0] <= self.now)
+                if due:
+                    self.timers.remove(due[0]); due[0][2]()
+                continue
+            if due:
+                self.timers.remove(due[0]); due[0][2](); continue
+            if self.idle:
+                batch, self.idle = self.idle, []
+                for _, callback in batch:
+                    callback()
+                continue
+            upcoming = [k[0] for k in self.keys] + [t[0] for t in self.timers]
+            if not upcoming:
                 break
-            self.queue.remove(due[0])
-            self.now = max(self.now, due[0][0])
-            due[0][2]()
+            self.now = max(self.now, min(upcoming))
         self.now = max(self.now, until)
 
 
-def held_arrow(release_at, big=False, autorepeat_from=500):
-    """Aperta a seta em 0 e solta em `release_at`, com a repetição do X11 no meio."""
-    root, steps = FakeRoot(), []
-
+def hold(stepper_cls, release_at, big=False, repeat_from=500, every=30):
+    """Seta apertada em 0 e solta em `release_at`; a repetição do teclado chega
+    como soltar e apertar no mesmo instante, a cada `every` ms."""
+    root, steps = FakeTk(), []
     def step(key, large):
-        steps.append(root.now)
-        root.now += 30
-
-    stepper = Stepper(root, step)
-    root.after(0, lambda: stepper.press("Right", big))
-    for t in range(autorepeat_from, release_at, 33):
-        root.after(t, lambda: stepper.release("Right"))
-        root.after(t, lambda: stepper.press("Right", big))
-    root.after(release_at, lambda: stepper.release("Right"))
+        steps.append(root.now); root.now += FakeTk.STEP_MS
+    stepper = stepper_cls(root, step)
+    root.key(0, lambda: stepper.press("Right", big))
+    for t in range(repeat_from, release_at, every):
+        root.key(t, lambda: stepper.release("Right"))
+        root.key(t, lambda: stepper.press("Right", big))
+    root.key(release_at, lambda: stepper.release("Right"))
     return root, stepper, steps
 
 
 class TestStepper:
     def test_a_tap_moves_one_step(self):
-        root, _, steps = held_arrow(release_at=100)
+        root, _, steps = hold(Stepper, release_at=100)
 
         root.run_until(3000)
 
         assert len(steps) == 1
 
-    def test_holding_keeps_moving_and_releasing_stops_at_once(self):
-        root, _, steps = held_arrow(release_at=1500)
+    def test_holding_moves_and_releasing_stops_at_once(self):
+        # O caso medido: 3,6 s segurando, e o vídeo seguia 2,9 s depois de soltar.
+        root, _, steps = hold(Stepper, release_at=3600)
 
-        root.run_until(5000)
+        root.run_until(30_000)
 
-        assert len(steps) > 20
-        # Depois de soltar, no máximo o passo que já estava sendo desenhado.
-        assert max(steps) <= 1500 + Stepper.RELEASE_MS + 30
+        assert len(steps) > 80
+        assert max(steps) <= 3600 + FakeTk.STEP_MS
 
-    def test_keyboard_repeat_adds_no_steps_of_its_own(self):
-        noisy, _, with_repeat = held_arrow(release_at=1500)
-        quiet, _, without = held_arrow(release_at=1500, autorepeat_from=10_000)
+    def test_the_longer_the_hold_the_same_stop(self):
+        # Com a fila crescendo, o atraso aumentava com o tempo segurando.
+        root, _, steps = hold(Stepper, release_at=8000)
 
-        noisy.run_until(5000)
-        quiet.run_until(5000)
+        root.run_until(60_000)
 
-        assert abs(len(with_repeat) - len(without)) <= 2
+        assert max(steps) <= 8000 + FakeTk.STEP_MS
 
     def test_big_steps_held_are_paced(self):
-        root, _, steps = held_arrow(release_at=1300, big=True)
+        root, _, steps = hold(Stepper, release_at=1300, big=True)
 
-        root.run_until(5000)
+        root.run_until(10_000)
 
         assert 4 <= len(steps) <= 7
 
     def test_losing_focus_stops_the_walk(self):
         # Sem foco, a janela não recebe mais nem a repetição nem o soltar da tecla.
-        root, stepper, steps = held_arrow(release_at=10_000, autorepeat_from=10_000)
+        root, stepper, steps = hold(Stepper, release_at=10_000, repeat_from=10_000)
 
         root.run_until(800)
         stepper.stop()
         root.run_until(3000)
 
-        assert max(steps) <= 800 + 30
+        assert max(steps) <= 800 + FakeTk.STEP_MS
