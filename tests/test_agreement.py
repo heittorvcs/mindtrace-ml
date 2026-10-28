@@ -38,3 +38,29 @@ def test_no_significant_difference_is_not_equivalence():
 
     assert result["paired_t_p"] > 0.5
     assert result["tost_p"] > 0.05
+
+
+def test_total_error_splits_mse_into_bias_and_spread():
+    from mindtrace_ml.agreement import total_error
+    manual = np.array([10.0, 20.0, 30.0, 40.0])
+    automatic = manual + np.array([2.0, 2.0, 2.0, 2.0])     # erra sempre +2: só viés
+
+    result = total_error(manual, automatic)
+
+    assert result["rmse"] == pytest.approx(2.0)
+    assert result["bias_share"] == pytest.approx(1.0)
+    assert result["mse"] == pytest.approx(result["bias"] ** 2 + result["spread"])
+
+
+def test_total_error_spread_without_bias_and_the_session_that_weighs_most():
+    from mindtrace_ml.agreement import total_error
+    manual = np.array([10.0, 10.0, 0.0])
+    automatic = np.array([12.0, 8.0, 0.0])                   # +2 e -2: média certa, espalhamento
+
+    result = total_error(manual, automatic, sessions=["a", "b", "c"])
+
+    assert result["bias"] == pytest.approx(0.0)
+    assert result["bias_share"] == pytest.approx(0.0)
+    # Sessão sem episódios marcados não divide por zero no erro relativo.
+    assert result["relative_median"] == pytest.approx(0.2)
+    assert result["worst_session"] in {"a", "b"} and result["worst_share"] == pytest.approx(0.5)

@@ -39,6 +39,7 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     session_features,
     targets,
 )
+from mindtrace_ml.agreement import total_error  # noqa: E402
 from mindtrace_ml.labels import seen_frames  # noqa: E402
 from mindtrace_ml.schema import SESSION_BEHAVIORS  # noqa: E402
 from mindtrace_ml.triage_model import animal_of, label_sets  # noqa: E402
@@ -343,6 +344,16 @@ def main() -> int:
             if group.manual_s.sum() > 0 and len(group) > 2:
                 r = np.corrcoef(group.manual_s, group.detected_s)[0, 1]
                 print(f"  {method}: tempo total manual × detectado, r = {r:.2f}")
+            # O desfecho que vai para o artigo é o total por sessão: quanto ele erra,
+            # e se o erro é viés (sempre para o mesmo lado) ou espalhamento.
+            for what, manual_col, detected_col, unit in (("contagem", "manual_bouts", "detected_bouts", "rearings"),
+                                                          ("tempo", "manual_s", "detected_s", "s")):
+                e = total_error(group[manual_col], group[detected_col], group["sessão"])
+                worst = (f"; mais pesa: {e['worst_session']} ({e['worst_share']:.0%} do MSE)"
+                         if "worst_session" in e else "")
+                print(f"  {method}, {what} por sessão: RMSE {e['rmse']:.1f} {unit} (média marcada "
+                      f"{e['manual_mean']:.1f}, erro relativo mediano {e['relative_median']:.0%}), "
+                      f"viés {e['bias']:+.1f} = {e['bias_share']:.0%} do MSE{worst}")
         print()
 
     # --- 2. clipes de outros animais ----------------------------------------

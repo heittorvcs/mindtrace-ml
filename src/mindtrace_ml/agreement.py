@@ -20,6 +20,37 @@ import numpy as np
 from scipy import stats
 
 
+def total_error(manual, automatic, sessions=None) -> dict:
+    """Erro do total por sessão: o MSE e de que ele é feito.
+
+    O MSE se decompõe em viés² mais espalhamento (a variância das diferenças).
+    Viés baixo com espalhamento alto quer dizer que a média bate, mas cada sessão
+    erra para um lado. Em contagem, o RMSE pesa mais as sessões com muitos
+    episódios, por isso vai junto o erro relativo mediano (com o total marcado
+    de pelo menos 1, para uma sessão sem episódios não dividir por zero). Com
+    `sessions`, diz também qual sessão pesa mais no MSE.
+    """
+    manual, automatic = np.asarray(manual, float), np.asarray(automatic, float)
+    error = automatic - manual
+    mse = float(np.mean(error ** 2))
+    bias, spread = float(error.mean()), float(error.var())
+    result = {
+        "n": len(error),
+        "mse": mse,
+        "rmse": float(np.sqrt(mse)),
+        "bias": bias,
+        "spread": spread,
+        "bias_share": bias ** 2 / mse if mse else 0.0,
+        "manual_mean": float(manual.mean()),
+        "relative_median": float(np.median(np.abs(error) / np.maximum(manual, 1.0))),
+    }
+    if sessions is not None and mse:
+        share = error ** 2 / np.sum(error ** 2)
+        worst = int(np.argmax(share))
+        result["worst_session"], result["worst_share"] = list(sessions)[worst], float(share[worst])
+    return result
+
+
 def concordance(manual: np.ndarray, automatic: np.ndarray) -> float:
     """Coeficiente de concordância de Lin: 1 só se os pontos caem na diagonal."""
     covariance = np.mean((manual - manual.mean()) * (automatic - automatic.mean()))
