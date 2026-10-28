@@ -6,7 +6,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from label_session import Annotation, replace_rows  # noqa: E402
+from label_session import Annotation, Stepper, replace_rows  # noqa: E402
 from mindtrace_ml.labels import load_labels  # noqa: E402
 
 
@@ -118,3 +118,90 @@ class TestSuggestions:
         assert annotation.remove_at(50, allowed={"rearing"}) == ("rearing", 40, 60)
         assert annotation.remove_at(50, allowed={"rearing"}) is None
         assert annotation.intervals == [("object_interaction", 0, 100)]
+
+
+class FakeRoot:
+    """Relógio de mentira com o after/after_cancel do Tk. Cada passo custa 30 ms de
+    desenho, como no notebook; o que vence enquanto isso espera, como na fila do Tk."""
+
+    def __init__(self):
+        self.now, self.queue, self.count = 0, [], 0
+
+    def after(self, ms, callback):
+        self.count += 1
+        self.queue.append((self.now + ms, self.count, callback))
+        return self.count
+
+    def after_cancel(self, ident):
+        self.queue = [item for item in self.queue if item[1] != ident]
+
+    def run_until(self, until):
+        while True:
+            due = sorted(item for item in self.queue if item[0] <= until)
+            if not due:
+                break
+            self.queue.remove(due[0])
+            self.now = max(self.now, due[0][0])
+            due[0][2]()
+        self.now = max(self.now, until)
+
+
+def held_arrow(release_at, big=False, autorepeat_from=500):
+    """Aperta a seta em 0 e solta em `release_at`, com a repetição do X11 no meio."""
+    root, steps = FakeRoot(), []
+
+    def step(key, large):
+        steps.append(root.now)
+        root.now += 30
+
+    stepper = Stepper(root, step)
+    root.after(0, lambda: stepper.press("Right", big))
+    for t in range(autorepeat_from, release_at, 33):
+        root.after(t, lambda: stepper.release("Right"))
+        root.after(t, lambda: stepper.press("Right", big))
+    root.after(release_at, lambda: stepper.release("Right"))
+    return root, stepper, steps
+
+
+class TestStepper:
+    def test_a_tap_moves_one_step(self):
+        root, _, steps = held_arrow(release_at=100)
+
+        root.run_until(3000)
+
+        assert len(steps) == 1
+
+    def test_holding_keeps_moving_and_releasing_stops_at_once(self):
+        root, _, steps = held_arrow(release_at=1500)
+
+        root.run_until(5000)
+
+        assert len(steps) > 20
+        # Depois de soltar, no máximo o passo que já estava sendo desenhado.
+        assert max(steps) <= 1500 + Stepper.RELEASE_MS + 30
+
+    def test_keyboard_repeat_adds_no_steps_of_its_own(self):
+        noisy, _, with_repeat = held_arrow(release_at=1500)
+        quiet, _, without = held_arrow(release_at=1500, autorepeat_from=10_000)
+
+        noisy.run_until(5000)
+        quiet.run_until(5000)
+
+        assert abs(len(with_repeat) - len(without)) <= 2
+
+    def test_big_steps_held_are_paced(self):
+        root, _, steps = held_arrow(release_at=1300, big=True)
+
+        root.run_until(5000)
+
+        assert 4 <= len(steps) <= 7
+
+    def test_losing_focus_stops_the_walk(self):
+        # Sem foco, a janela não recebe mais nem a repetição nem o soltar da tecla.
+        root, stepper, steps = held_arrow(release_at=10_000, autorepeat_from=10_000)
+
+        root.run_until(800)
+        stepper.stop()
+        root.run_until(3000)
+
+        assert max(steps) <= 800 + 30

@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from label_session import SCALE, SPEEDS, ZOOM_SEC, Annotation, Video, replace_rows  # noqa: E402
+from label_session import SCALE, SPEEDS, ZOOM_SEC, Annotation, Stepper, Video, replace_rows  # noqa: E402
 from mindtrace_ml.behavior_model import bouts, label_mask  # noqa: E402
 
 # As mesmas cores do gráfico de comparação: azul nas duas, laranja só na
@@ -214,6 +214,9 @@ class App:
         self.full.bind("<Button-1>", lambda e: self.seek_click(e, 0, self.video.count))
         self.zoom.bind("<Button-1>", lambda e: self.seek_click(e, *self.zoom_range()))
         root.bind("<Key>", self.on_key)
+        root.bind("<KeyRelease>", self.on_key_release)
+        self.stepper = Stepper(root, self.step)
+        root.bind("<FocusOut>", self.stepper.stop)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         root.title(f"Revisão de marcações — {session_id} ({behavior})")
 
@@ -221,6 +224,15 @@ class App:
         self.render()
 
     # --- navegação ---------------------------------------------------------
+    def step(self, key: str, big: bool) -> None:
+        self.play(False)
+        jump = int(round(2 * self.video.fps)) if big else 1
+        self.seek(self.video.position + (jump if key == "Right" else -jump))
+
+    def on_key_release(self, event) -> None:
+        if event.keysym in ("Right", "Left"):
+            self.stepper.release(event.keysym)
+
     def seek(self, frame: int) -> None:
         self.video.read(frame)
         self.render()
@@ -272,9 +284,7 @@ class App:
         if key == "space":
             self.play(not self.playing)
         elif key in ("Right", "Left"):
-            self.play(False)
-            step = int(round(2 * self.video.fps)) if shift else 1
-            self.seek(self.video.position + (step if key == "Right" else -step))
+            self.stepper.press(key, shift)
             return
         elif key in ("Up", "Down"):
             index = SPEEDS.index(self.speed) + (1 if key == "Up" else -1)

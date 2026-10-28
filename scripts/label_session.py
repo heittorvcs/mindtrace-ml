@@ -168,6 +168,60 @@ def replace_rows(path: Path, fresh: pd.DataFrame, session_id: str, annotator: st
     fresh.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+class Stepper:
+    """Seta segurada anda no ritmo do desenho e para ao soltar.
+
+    Segurando a tecla, o sistema a repete mais depressa do que um quadro é lido e
+    desenhado. Os eventos se acumulavam na fila, e o vídeo seguia andando depois
+    de soltar. Aqui o aperto anda um passo, a repetição do teclado é ignorada, e,
+    depois de DELAY_MS segurando, um laço próprio anda um passo por vez, cada um
+    só depois do desenho do anterior. No X11, a repetição chega como soltar e
+    apertar de novo quase juntos; por isso soltar só vale se nenhum aperto vier
+    em RELEASE_MS.
+    """
+
+    DELAY_MS = 300
+    RELEASE_MS = 40
+    BIG_EVERY_MS = 200   # passos grandes (2 s) segurados: um a cada 0,2 s
+
+    def __init__(self, root, step):
+        self.root, self.step = root, step   # step(tecla, grande)
+        self.held = None                    # (tecla, grande)
+        self.loop_id = self.release_id = None
+
+    def press(self, key: str, big: bool) -> None:
+        if self.release_id is not None:
+            self.root.after_cancel(self.release_id)
+            self.release_id = None
+        if self.held is not None and self.held[0] == key:
+            return
+        self.stop()
+        self.held = (key, big)
+        self.step(key, big)
+        self.loop_id = self.root.after(self.DELAY_MS, self.tick)
+
+    def tick(self) -> None:
+        self.loop_id = None
+        if self.held is None:
+            return
+        self.step(*self.held)
+        self.loop_id = self.root.after(self.BIG_EVERY_MS if self.held[1] else 1, self.tick)
+
+    def release(self, key: str) -> None:
+        if self.held is None or self.held[0] != key:
+            return
+        if self.release_id is not None:
+            self.root.after_cancel(self.release_id)
+        self.release_id = self.root.after(self.RELEASE_MS, self.stop)
+
+    def stop(self, _event=None) -> None:
+        for name in ("loop_id", "release_id"):
+            if getattr(self, name) is not None:
+                self.root.after_cancel(getattr(self, name))
+                setattr(self, name, None)
+        self.held = None
+
+
 class Video:
     def __init__(self, path: Path):
         self.capture = cv2.VideoCapture(str(path))
@@ -245,6 +299,9 @@ class App:
         self.full.bind("<Button-1>", lambda e: self.seek_click(e, 0, self.video.count))
         self.zoom.bind("<Button-1>", lambda e: self.seek_click(e, *self.zoom_range()))
         root.bind("<Key>", self.on_key)
+        root.bind("<KeyRelease>", self.on_key_release)
+        self.stepper = Stepper(root, self.step)
+        root.bind("<FocusOut>", self.stepper.stop)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         root.title(f"Rotulagem de sessão — {session_id}")
 
@@ -252,6 +309,15 @@ class App:
         self.render()
 
     # --- navegação ---------------------------------------------------------
+    def step(self, key: str, big: bool) -> None:
+        self.play(False)
+        jump = int(round(2 * self.video.fps)) if big else 1
+        self.seek(self.video.position + (jump if key == "Right" else -jump))
+
+    def on_key_release(self, event) -> None:
+        if event.keysym in ("Right", "Left"):
+            self.stepper.release(event.keysym)
+
     def seek(self, frame: int) -> None:
         self.video.read(frame)
         self.render()
@@ -301,9 +367,7 @@ class App:
         if key == "space":
             self.play(not self.playing)
         elif key in ("Right", "Left"):
-            self.play(False)
-            jump = int(round(2 * self.video.fps)) if shift else 1
-            self.seek(frame + (jump if key == "Right" else -jump))
+            self.stepper.press(key, shift)
             return
         elif key in ("Up", "Down"):
             index = SPEEDS.index(self.speed) + (1 if key == "Up" else -1)
