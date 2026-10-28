@@ -1,0 +1,2 @@
+﻿session_id,annotator,source_a,source_b,names,prefill,groups,pending,decided
+TT_15_cam1,heittor,data/relabel/session_labels_r1_original.csv,/run/media/heittor/08C4170BC416FB20/memorylab/mindtrace-ml/data/relabel/session_labels_r2.csv,"antiga,nova",b,16,0,189-221;250-272;974-1056;2097-2135;2345-2366;2721-2873;3049-3110;3249-3350;3705-3763;4156-4183;4548-4602;4716-4867;6034-6078;7053-7100;8226-8289;9021-9114
