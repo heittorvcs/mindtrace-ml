@@ -41,8 +41,7 @@ def floor_for(session_id: str, pose: pd.DataFrame, floors: dict, threshold: floa
     """O chão marcado da arena da sessão ou, sem marcação, o retângulo dos percentis do dorso.
 
     O retângulo é a parede que as features usavam antes do chão marcado: os
-    percentis 1 e 99 da posição do dorso. Fica para a habituação, cujos vídeos
-    se perderam antes da marcação.
+    percentis 1 e 99 da posição do dorso. Fica para arenas sem marcação.
     """
     floor = floors.get(arena_of(session_id))
     if floor is not None:
