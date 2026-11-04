@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from mindtrace_ml.behavior_model import (  # noqa: E402
     BEHAVIORS,
     ContextModel,
+    EPISODE_RULES,
     bouts,
     compare,
     frame_mask,
@@ -142,7 +143,7 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
             for inner in select_on:
                 data = sessions[inner]
                 mask = gate(behavior, frame_mask(scores[inner], data["centers"], len(data["frames"]),
-                                                 candidate, fps), data["freezing"], fps) & data["visible"]
+                                                 candidate, fps), data["freezing"], fps, data["episodes"]) & data["visible"]
                 marked, detected = bouts(data["marked"][behavior] & data["visible"]), bouts(mask)
                 pairs += matched_episodes(marked, detected)
                 manual += len(marked)
@@ -157,7 +158,7 @@ def fit_with_threshold(sessions: dict, names, behavior: str, fps: float,
                 data = sessions[inner]
                 seen = data["visible"]
                 mask = gate(behavior, frame_mask(scores[inner], data["centers"], len(data["frames"]),
-                                                 candidate, fps), data["freezing"], fps)
+                                                 candidate, fps), data["freezing"], fps, data["episodes"])
                 for first, last in bouts(data["marked"][behavior] & seen):
                     total += 1
                     hits += mask[first:last + 1].any()
@@ -238,6 +239,8 @@ def main() -> int:
                              "(padrão 0,40, o do v7, escolhido antes destas sessões); negativo desliga")
     parser.add_argument("--threshold", type=float, default=None,
                         help="limiar do modelo, sem a busca interna (horas mais rápido); sem ele, a busca do v7")
+    parser.add_argument("--episodes", choices=sorted(EPISODE_RULES), default="atual",
+                        help="regra de episódio do rearing (rótulos, detecção e contagem); ver EPISODE_RULES")
     parser.add_argument("--no-floor", action="store_true",
                         help="parede estimada pelos percentis do dorso, como até o v8, em vez do chão marcado")
     args = parser.parse_args()
@@ -272,8 +275,9 @@ def main() -> int:
         data["visible"] = seen_frames(progress[progress.session_id == session], len(data["frames"]))
         data["seen"] = data["visible"][data["centers"]]
         own = labels[labels.session_id == session]
-        data["y"] = targets(own, data["frames"], data["centers"], args.fps)
-        data["marked"] = {b: label_mask(own, b, data["frames"], args.fps) for b in BEHAVIORS}
+        data["episodes"] = args.episodes
+        data["y"] = targets(own, data["frames"], data["centers"], args.fps, args.episodes)
+        data["marked"] = {b: label_mask(own, b, data["frames"], args.fps, args.episodes) for b in BEHAVIORS}
         sessions[session] = data
         print(".", end="", flush=True)
     print()
@@ -339,7 +343,7 @@ def main() -> int:
                          if behavior == "rearing" else [])
             for method, cut in methods:
                 predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
-                                                      cut, args.fps), data["freezing"], args.fps)
+                                                      cut, args.fps), data["freezing"], args.fps, args.episodes)
                 results.append({"sessão": held, "comportamento": behavior, "método": method, "limiar": cut,
                                 **compare(marked[visible], predicted[visible], args.fps)})
                 if behavior == "rearing":
@@ -429,7 +433,7 @@ def main() -> int:
         import joblib
         args.save.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"models": final, "thresholds": thresholds, "target_recall": args.target_recall,
-                     "context": context, "floor": floors is not None,
+                     "context": context, "floor": floors is not None, "episodes": args.episodes,
                      "features": list(sessions[labeled[0]]["X"].columns),
                      "sessions": labeled}, args.save)
         print(f"\nmodelos salvos em {args.save}")
@@ -447,7 +451,7 @@ def clip_evaluation(clips, behaviors, final, thresholds, args, objects) -> None:
         for behavior in behaviors:
             scores = final[behavior].predict_proba(data["X"])[:, 1]
             mask = frame_mask(scores, data["centers"], n, thresholds[behavior], args.fps)
-            masks[behavior][session] = (data["frames"], gate(behavior, mask, data["freezing"], args.fps))
+            masks[behavior][session] = (data["frames"], gate(behavior, mask, data["freezing"], args.fps, args.episodes))
         head[session] = (data["frames"], data["triaged"]["active_head"].to_numpy(bool))
         print(".", end="", flush=True)
     print("\n")

@@ -70,6 +70,17 @@ MIN_BOUT_SEC = 0.3
 # os rearings curtos não explicava as duas ratas com um mesmo corte.
 MERGE_GAP_SEC = {"rearing": 0.5}
 
+# Regras de episódio do rearing, para contar como a planilha da habituação.
+# "atual": descidas de até MERGE_GAP_SEC não encerram o episódio, sem limite.
+# "par" (hipótese congelada em 2026-11-04, em teste): uma descida de menos de
+# 0,6 s junta no máximo 2 rearings, e o episódio só conta com 1,2 s ou mais. Na
+# marcação de 9 ratas, nos 5 min, erro médio de 4% contra a planilha (atual 13%).
+# O mínimo vale para contar, não para treinar: o rearing curto continua positivo.
+EPISODE_RULES = {
+    "atual": {"gap_sec": MERGE_GAP_SEC["rearing"], "max_join": None, "min_sec": None},
+    "par": {"gap_sec": 0.6, "max_join": 2, "min_sec": 1.2},
+}
+
 
 # Sinais em que importa a direção da mudança dentro da janela, não só o nível.
 # Um rearing tem forma — sobe, fica, desce —, e o resumo por mediana e quantis
@@ -181,7 +192,7 @@ def detect(bundle: dict, behavior: str, session: dict, fps: float) -> np.ndarray
     scores = bundle["models"][behavior].predict_proba(session["X"][bundle["features"]])[:, 1]
     mask = frame_mask(scores, session["centers"], len(session["frames"]),
                       bundle["thresholds"][behavior], fps, low=bundle.get("low_thresholds", {}).get(behavior))
-    return gate(behavior, mask, session["freezing"], fps)
+    return gate(behavior, mask, session["freezing"], fps, bundle.get("episodes", "atual"))
 
 
 def window_centers(n_frames: int, step: int = STEP) -> np.ndarray:
@@ -193,9 +204,41 @@ def merge_gap(behavior: str, fps: float) -> int:
     return int(round(MERGE_GAP_SEC.get(behavior, 0.0) * fps))
 
 
-def label_mask(labels: pd.DataFrame, behavior: str, frames: np.ndarray, fps: float) -> np.ndarray:
-    """Quadros marcados, com a mesma definição de episódio usada na detecção."""
-    return intervals_to_mask(bouts_for(labels, behavior, gap=merge_gap(behavior, fps)), frames)
+def label_mask(labels: pd.DataFrame, behavior: str, frames: np.ndarray, fps: float,
+               rule: str = "atual", count: bool = True) -> np.ndarray:
+    """Quadros marcados, com a mesma definição de episódio usada na detecção.
+
+    `count=False` não aplica a duração mínima da regra: é o alvo do treino.
+    """
+    if behavior != "rearing" or rule == "atual":
+        return intervals_to_mask(bouts_for(labels, behavior, gap=merge_gap(behavior, fps)), frames)
+    mask = join_episodes(intervals_to_mask(bouts_for(labels, behavior), frames), behavior, fps, rule)
+    return drop_short(mask, behavior, fps, rule) if count else mask
+
+
+def join_episodes(mask: np.ndarray, behavior: str, fps: float, rule: str = "atual") -> np.ndarray:
+    """Junta os trechos separados por uma descida breve, conforme a regra."""
+    if behavior != "rearing" or rule == "atual":
+        return close_gaps(mask, merge_gap(behavior, fps))
+    spec = EPISODE_RULES[rule]
+    found = bouts(mask)
+    if not found:
+        return mask
+    out = mask.copy()
+    joined = 1
+    for (_, previous_end), (start, _) in zip(found, found[1:]):
+        if (start - previous_end) / fps < spec["gap_sec"] and joined < spec["max_join"]:
+            out[previous_end:start] = True
+            joined += 1
+        else:
+            joined = 1
+    return out
+
+
+def drop_short(mask: np.ndarray, behavior: str, fps: float, rule: str = "atual") -> np.ndarray:
+    """Tira os episódios mais curtos que o mínimo da regra, que não contam."""
+    minimum = EPISODE_RULES[rule]["min_sec"] if behavior == "rearing" else None
+    return _sustained(mask, int(round(minimum * fps))) if minimum else mask
 
 
 def close_gaps(mask: np.ndarray, gap: int) -> np.ndarray:
@@ -211,9 +254,9 @@ def close_gaps(mask: np.ndarray, gap: int) -> np.ndarray:
 
 
 def targets(labels: pd.DataFrame, frames: np.ndarray, centers: np.ndarray,
-            fps: float = 29.97) -> pd.DataFrame:
+            fps: float = 29.97, rule: str = "atual") -> pd.DataFrame:
     """Para cada centro, se cada comportamento estava marcado naquele quadro."""
-    return pd.DataFrame({behavior: label_mask(labels, behavior, frames, fps)[centers]
+    return pd.DataFrame({behavior: label_mask(labels, behavior, frames, fps, rule, count=False)[centers]
                          for behavior in BEHAVIORS})
 
 
@@ -288,7 +331,7 @@ def triage_episodes(window_scores: np.ndarray, centers: np.ndarray, n_frames: in
     return sorted(classify(main) + [(a, b, peak, False) for a, b, peak, _ in classify(weak)])
 
 
-def gate(behavior: str, mask: np.ndarray, freezing: np.ndarray, fps: float) -> np.ndarray:
+def gate(behavior: str, mask: np.ndarray, freezing: np.ndarray, fps: float, rule: str = "atual") -> np.ndarray:
     """Regras finais de cada comportamento sobre os episódios detectados.
 
     Rearing: descidas de menos de MERGE_GAP_SEC não encerram o episódio — a
@@ -301,10 +344,10 @@ def gate(behavior: str, mask: np.ndarray, freezing: np.ndarray, fps: float) -> n
     dos dois animais mais imóveis. Custo medido nas sessões: 7% do grooming
     marcado cai no que a camada chama de freezing.
     """
-    mask = close_gaps(mask, merge_gap(behavior, fps))
+    mask = join_episodes(mask, behavior, fps, rule)
     if behavior == "grooming":
         mask = mask & ~freezing
-    return _sustained(mask, int(round(MIN_BOUT_SEC * fps)))
+    return drop_short(_sustained(mask, int(round(MIN_BOUT_SEC * fps))), behavior, fps, rule)
 
 
 def bouts(mask: np.ndarray) -> list[tuple[int, int]]:
