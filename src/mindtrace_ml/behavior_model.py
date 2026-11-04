@@ -349,6 +349,46 @@ def matched_episodes(manual: list[tuple[int, int]], found: list[tuple[int, int]]
     return pairs
 
 
+# Focinho a menos disto da borda de um objeto, em algum quadro do episódio:
+# rearing no objeto. Na arbitragem de 2026-11-04, 18 dos 27 rearings que uma
+# passada tinha perdido eram assim, e o modelo quase não os acha.
+OBJECT_MARGIN_PX = 15
+
+
+def object_bouts(marked: np.ndarray, pose: pd.DataFrame, objects: pd.DataFrame,
+                 margin: float = OBJECT_MARGIN_PX) -> list[tuple[int, int]]:
+    """Episódios marcados em que o focinho chega a menos de `margin` px de um objeto.
+
+    Sem filtro de confiança: no rearing no objeto o focinho some com frequência,
+    e o ponto mais provável ainda diz onde a cabeça está. Só o ponto ausente
+    (coordenada negativa) fica de fora.
+    """
+    if objects.empty:
+        return []
+    x, y = pose["nose_x"].to_numpy(float), pose["nose_y"].to_numpy(float)
+    present = (x >= 0) & (y >= 0)
+    edge = np.min([np.hypot(x - o.center_x, y - o.center_y) - o.radius for o in objects.itertuples()], axis=0)
+    near = present & (edge < margin)
+    return [(s, e) for s, e in bouts(marked) if near[s:e + 1].any()]
+
+
+def ignore_bouts(marked: np.ndarray, predicted: np.ndarray,
+                 ignored: list[tuple[int, int]]) -> tuple[np.ndarray, np.ndarray]:
+    """Tira da conta os episódios marcados dados e as detecções que encostam neles.
+
+    O episódio ignorado não conta como perdido, e a detecção sobre ele não conta
+    como falsa. Uma detecção que encosta nele e num rearing contado sai também:
+    é raro, e mantê-la pela metade criaria um alarme falso que não existe.
+    """
+    marked, predicted = marked.copy(), predicted.copy()
+    for s, e in ignored:
+        marked[s:e + 1] = False
+    for s, e in bouts(predicted):
+        if any(first <= e and s <= last for first, last in ignored):
+            predicted[s:e + 1] = False
+    return marked, predicted
+
+
 def make_model(seed: int = 0):
     """Árvores rasas, parâmetros fixados antes de ver resultado.
 

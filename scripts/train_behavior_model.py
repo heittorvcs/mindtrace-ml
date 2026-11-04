@@ -33,9 +33,11 @@ from mindtrace_ml.behavior_model import (  # noqa: E402
     compare,
     frame_mask,
     gate,
+    ignore_bouts,
     label_mask,
     make_model,
     matched_episodes,
+    object_bouts,
     session_features,
     targets,
 )
@@ -67,7 +69,9 @@ def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
             raise FileNotFoundError(f"{cached}: rode extract_video_features.py (ou use --no-video)")
         pixels = pd.read_csv(cached, encoding="utf-8-sig")
     floor = floor_for(session, pose, floors) if floors is not None else None
-    return session_features(pose, objects[objects.session_id == session], fps, pixels, floor=floor)
+    data = session_features(pose, objects[objects.session_id == session], fps, pixels, floor=floor)
+    data["pose"] = pose
+    return data
 
 
 def load_clips() -> pd.DataFrame:
@@ -221,6 +225,8 @@ def main() -> int:
     parser.add_argument("--target-recall", type=float, default=None,
                         help="fração dos episódios a achar (ex.: 0.95); sem ela, equilíbrio F1")
     parser.add_argument("--results", type=Path, default=None, help="grava os resultados por sessão (CSV)")
+    parser.add_argument("--scores", type=Path, default=None,
+                        help="grava as notas de cada sessão deixada de fora (joblib), para medir sem treinar de novo")
     parser.add_argument("--min-exploration", type=float, default=None,
                         help="tira do resumo, não do treino, as sessões do NOR com menos segundos de exploração")
     parser.add_argument("--no-context", action="store_true",
@@ -288,7 +294,7 @@ def main() -> int:
     # sugestão tende a concordar com ela.
     context = not args.no_context
     SESSIONS.update(sessions)
-    results = []
+    results, held_scores = [], {}
     for behavior in behaviors:
         pool = eligible[behavior]
         held_list = [s for s in pool if not assisted[s]]
@@ -316,24 +322,31 @@ def main() -> int:
                 outcomes.append(held_out_scores(held, train, behavior, args.fps, args.target_recall, voters, context,
                                                 fixed=args.threshold))
                 progress_line(held, len(outcomes), len(jobs))
+        held_scores[behavior] = dict(zip(held_list, outcomes))
         for held, (threshold, scores) in zip(held_list, outcomes):
             data = sessions[held]
             visible = data["visible"]
-            predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
-                                                  threshold, args.fps), data["freezing"], args.fps)
             marked = data["marked"][behavior]
-            results.append({"sessão": held, "comportamento": behavior, "método": "modelo",
-                            "limiar": threshold,
-                            **compare(marked[visible], predicted[visible], args.fps)})
             # O uso tem um limiar só para todas as sessões. O escolhido a cada animal
             # deixado de fora variou de 0,45 a 0,70 no v7, e com ele a contagem foi a
             # -8%; nas mesmas notas, com 0,40 para todos, ficou em -1%.
+            methods = [("modelo", threshold)]
             if args.fixed_threshold >= 0:
-                fixed = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
-                                                  args.fixed_threshold, args.fps), data["freezing"], args.fps)
-                results.append({"sessão": held, "comportamento": behavior,
-                                "método": f"limiar fixo {args.fixed_threshold:.2f}", "limiar": args.fixed_threshold,
-                                **compare(marked[visible], fixed[visible], args.fps)})
+                methods.append((f"limiar fixo {args.fixed_threshold:.2f}", args.fixed_threshold))
+            # Rearing no objeto só existe no NOR, e o uso previsto (open field e
+            # habituação) não tem objeto: a medida sem ele é a que importa lá.
+            on_object = (object_bouts(marked, data["pose"], objects[objects.session_id == held])
+                         if behavior == "rearing" else [])
+            for method, cut in methods:
+                predicted = gate(behavior, frame_mask(scores, data["centers"], len(data["frames"]),
+                                                      cut, args.fps), data["freezing"], args.fps)
+                results.append({"sessão": held, "comportamento": behavior, "método": method, "limiar": cut,
+                                **compare(marked[visible], predicted[visible], args.fps)})
+                if behavior == "rearing":
+                    kept, shown = ignore_bouts(marked, predicted, on_object)
+                    results.append({"sessão": held, "comportamento": behavior, "método": f"{method}, sem objeto",
+                                    "limiar": cut, "ignored_bouts": len(on_object),
+                                    **compare(kept[visible], shown[visible], args.fps)})
             if behavior == "grooming":
                 rule = data["triaged"]["active_head"].to_numpy(bool)
                 results.append({"sessão": held, "comportamento": behavior, "método": "cabeça ativa",
@@ -341,6 +354,10 @@ def main() -> int:
     results = pd.DataFrame(results)
     if args.results:
         results.to_csv(args.results, index=False, encoding="utf-8-sig")
+    if args.scores:
+        import joblib
+        joblib.dump({"scores": held_scores, "centers": {s: d["centers"] for s, d in sessions.items()},
+                     "frames": {s: len(d["frames"]) for s, d in sessions.items()}}, args.scores)
 
     print("\n1. sessão deixada de fora — cada linha foi detectada por um modelo que não a viu\n")
     if excluded:
