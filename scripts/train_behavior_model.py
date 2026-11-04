@@ -57,21 +57,63 @@ CLIP_ROUNDS = (
 
 
 VIDEO_FEATURES = ROOT / "data" / "video_features"
+FEATURE_CACHE = ROOT / "models" / "cache" / "features"
+
+
+def feature_key(paths: list, objects: pd.DataFrame, floor, fps: float) -> str:
+    """Impressão digital de tudo de que as features de uma sessão dependem.
+
+    O conteúdo dos arquivos de entrada (pose, features de vídeo), os objetos e o
+    chão da sessão, o fps e o código do pacote inteiro: qualquer mudança em
+    `src/mindtrace_ml` invalida o cache, mesmo a que não mexe nas features.
+    """
+    import hashlib
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    digest.update(objects.to_csv(index=False).encode())
+    digest.update(b"no floor" if floor is None else np.asarray(floor, float).tobytes())
+    digest.update(repr(fps).encode())
+    for source in sorted((ROOT / "src" / "mindtrace_ml").glob("*.py")):
+        digest.update(source.read_bytes())
+    return digest.hexdigest()[:20]
 
 
 def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
-            video: bool = True, floors: dict | None = None) -> dict:
-    """Features de uma sessão; com `floors`, a parede é o chão marcado (arena.floor_for)."""
-    pose = pd.read_csv(pose_dir / f"{session}.csv", encoding="utf-8-sig")
+            video: bool = True, floors: dict | None = None, cache: Path | None = FEATURE_CACHE) -> dict:
+    """Features de uma sessão; com `floors`, a parede é o chão marcado (arena.floor_for).
+
+    Com `cache`, as features ficam em disco e só são recalculadas quando alguma
+    entrada muda (feature_key). Uma sessão de 20 min da habituação leva ~1,5 min.
+    """
+    import pickle
+    pose_path = pose_dir / f"{session}.csv"
+    pose = pd.read_csv(pose_path, encoding="utf-8-sig")
+    paths = [pose_path]
     pixels = None
     if video:
         cached = VIDEO_FEATURES / f"{session}.csv"
         if not cached.exists():
             raise FileNotFoundError(f"{cached}: rode extract_video_features.py (ou use --no-video)")
         pixels = pd.read_csv(cached, encoding="utf-8-sig")
+        paths.append(cached)
     floor = floor_for(session, pose, floors) if floors is not None else None
-    data = session_features(pose, objects[objects.session_id == session], fps, pixels, floor=floor)
+    own = objects[objects.session_id == session]
+    if cache is not None:
+        stored = cache / f"{session}-{feature_key(paths, own, floor, fps)}.pkl"
+        if stored.exists():
+            with open(stored, "rb") as handle:
+                return pickle.load(handle)
+    data = session_features(pose, own, fps, pixels, floor=floor)
     data["pose"] = pose
+    if cache is not None:
+        cache.mkdir(parents=True, exist_ok=True)
+        for old in cache.glob(f"{session}-*.pkl"):
+            old.unlink()
+        with open(stored.with_suffix(".tmp"), "wb") as handle:
+            pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        stored.with_suffix(".tmp").replace(stored)
     return data
 
 
@@ -83,7 +125,7 @@ def prepare_all(sessions: list, args, objects: pd.DataFrame, floors: dict | None
     e as longas (habituação, 20 min) vêm primeiro na ordem alfabética, o que
     equilibra os processos.
     """
-    task = (args.pose, objects, args.fps, not args.no_video, floors)
+    task = (args.pose, objects, args.fps, not args.no_video, floors, None if args.no_cache else FEATURE_CACHE)
     ready = {}
     if args.prepare_jobs <= 1:
         for session in sessions:
@@ -257,6 +299,8 @@ def main() -> int:
                         help="tira do resumo, não do treino, as sessões do NOR com menos segundos de exploração")
     parser.add_argument("--no-context", action="store_true",
                         help="um estágio só, como até o v6 (sem as notas das janelas vizinhas)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="recalcula as features sem ler nem gravar models/cache/features")
     parser.add_argument("--prepare-jobs", type=int, default=1,
                         help="processos para preparar as features das sessões (~0,5 GB cada)")
     parser.add_argument("--jobs", type=int, default=1,
@@ -470,7 +514,8 @@ def clip_evaluation(clips, behaviors, final, thresholds, args, objects) -> None:
     masks = {behavior: {} for behavior in behaviors}
     head = {}
     for session in sorted(clips.session_id.unique()):
-        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video, floors=args.floors)
+        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video, floors=args.floors,
+                       cache=None if args.no_cache else FEATURE_CACHE)
         n = len(data["frames"])
         for behavior in behaviors:
             scores = final[behavior].predict_proba(data["X"])[:, 1]
