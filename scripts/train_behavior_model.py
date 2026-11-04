@@ -75,6 +75,31 @@ def prepare(pose_dir: Path, session: str, objects: pd.DataFrame, fps: float,
     return data
 
 
+def prepare_all(sessions: list, args, objects: pd.DataFrame, floors: dict | None) -> dict:
+    """Features de todas as sessões, em `args.prepare_jobs` processos.
+
+    Cada sessão é independente, e a preparação usa um núcleo só: em série, era a
+    maior parte do treino (18 dos 27 min do v9). As sessões saem na ordem dada,
+    e as longas (habituação, 20 min) vêm primeiro na ordem alfabética, o que
+    equilibra os processos.
+    """
+    task = (args.pose, objects, args.fps, not args.no_video, floors)
+    ready = {}
+    if args.prepare_jobs <= 1:
+        for session in sessions:
+            ready[session] = prepare(task[0], session, *task[1:])
+            print(".", end="", flush=True)
+        return ready
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    with ProcessPoolExecutor(args.prepare_jobs, mp_context=multiprocessing.get_context("fork")) as pool_exec:
+        futures = {pool_exec.submit(prepare, task[0], s, *task[1:]): s for s in sessions}
+        for future in as_completed(futures):
+            ready[futures[future]] = future.result()
+            print(".", end="", flush=True)
+    return {s: ready[s] for s in sessions}
+
+
 def load_clips() -> pd.DataFrame:
     parts = []
     for name, labels_path, key_path in CLIP_ROUNDS:
@@ -232,6 +257,8 @@ def main() -> int:
                         help="tira do resumo, não do treino, as sessões do NOR com menos segundos de exploração")
     parser.add_argument("--no-context", action="store_true",
                         help="um estágio só, como até o v6 (sem as notas das janelas vizinhas)")
+    parser.add_argument("--prepare-jobs", type=int, default=1,
+                        help="processos para preparar as features das sessões (~0,5 GB cada)")
     parser.add_argument("--jobs", type=int, default=1,
                         help="sessões deixadas de fora treinadas em paralelo (processos)")
     parser.add_argument("--fixed-threshold", type=float, default=0.40,
@@ -269,17 +296,14 @@ def main() -> int:
     if floors is not None and not floors:
         parser.error("data/arena_floor.csv não existe: marque com scripts/mark_arena.py ou use --no-floor")
     print(f"preparando {len(labeled)} sessões rotuladas ", end="", flush=True)
-    sessions = {}
-    for session in labeled:
-        data = prepare(args.pose, session, objects, args.fps, video=not args.no_video, floors=floors)
+    sessions = prepare_all(labeled, args, objects, floors)
+    for session, data in sessions.items():
         data["visible"] = seen_frames(progress[progress.session_id == session], len(data["frames"]))
         data["seen"] = data["visible"][data["centers"]]
         own = labels[labels.session_id == session]
         data["episodes"] = args.episodes
         data["y"] = targets(own, data["frames"], data["centers"], args.fps, args.episodes)
         data["marked"] = {b: label_mask(own, b, data["frames"], args.fps, args.episodes) for b in BEHAVIORS}
-        sessions[session] = data
-        print(".", end="", flush=True)
     print()
 
     # O critério de exclusão do NOR: animal que mal explorou os objetos sai da
